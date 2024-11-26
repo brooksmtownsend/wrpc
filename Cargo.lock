@@ -1384,6 +1384,7 @@ dependencies = [
  "anyhow",
  "async-nats 0.38.0",
  "clap",
+ "futures",
  "tokio",
  "tracing-subscriber",
  "url",

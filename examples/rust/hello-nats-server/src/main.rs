@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
     .await
     .context("failed to connect to NATS.io server")?;
 
-    let wrpc = wrpc_transport_nats::Client::new(nats, prefix, None)
+    let wrpc = wrpc_transport_nats::Client::new(nats, prefix.clone(), Some(prefix.into()))
         .await
         .context("failed to construct transport client")?;
     let invocations = bindings::serve(&wrpc, Server)
