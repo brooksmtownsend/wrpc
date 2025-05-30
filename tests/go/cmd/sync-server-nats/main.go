@@ -8,10 +8,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	wrpcnats "github.com/bytecodealliance/wrpc/go/nats"
-	integration "github.com/bytecodealliance/wrpc/tests/go"
-	"github.com/bytecodealliance/wrpc/tests/go/bindings/sync_server"
+	"github.com/lmittmann/tint"
 	"github.com/nats-io/nats.go"
+	wrpcnats "wrpc.io/go/nats"
+	integration "wrpc.io/tests/go"
+	"wrpc.io/tests/go/bindings/sync_server"
 )
 
 func run(url string) error {
@@ -30,9 +31,9 @@ func run(url string) error {
 		}
 	}()
 
-	wrpc := wrpcnats.NewClient(nc, "go")
+	client := wrpcnats.NewClient(nc, wrpcnats.WithPrefix("go"))
 	var h integration.SyncHandler
-	stop, err := sync_server.Serve(wrpc, h, h)
+	stop, err := sync_server.Serve(client, h, h)
 	if err != nil {
 		return fmt.Errorf("failed to serve world: %w", err)
 	}
@@ -48,8 +49,10 @@ func run(url string) error {
 }
 
 func init() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelDebug, ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+	slog.SetDefault(slog.New(tint.NewHandler(os.Stderr, &tint.Options{
+		AddSource: true,
+		Level:     slog.LevelDebug,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey {
 				return slog.Attr{}
 			}

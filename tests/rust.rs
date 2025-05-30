@@ -1,5 +1,4 @@
 #![allow(clippy::type_complexity)]
-#![allow(unused)]
 
 mod common;
 
@@ -7,76 +6,232 @@ use core::str;
 use core::time::Duration;
 
 use std::sync::Arc;
+use std::thread;
 
 use anyhow::Context;
 use bytes::Bytes;
+use common::assert_async;
 use futures::{stream, FutureExt as _, Stream, StreamExt as _, TryStreamExt as _};
 use tokio::sync::{oneshot, RwLock};
 use tokio::time::sleep;
 use tokio::{join, select, spawn, try_join};
-use tracing::{info, info_span, instrument, Instrument};
-use wrpc_transport::{
-    Invoke as _, InvokeExt as _, ResourceBorrow, ResourceOwn, Serve as _, ServeExt as _,
-};
+use tracing::{info, info_span, instrument, Instrument, Span};
+use wrpc_transport::{InvokeExt as _, ResourceBorrow, ResourceOwn, ServeExt as _};
 
 #[instrument(skip_all, ret)]
-async fn assert_bindgen<C, I, S>(clt: Arc<I>, srv: Arc<S>) -> anyhow::Result<()>
+async fn assert_bindgen_async<C, I, S>(clt: Arc<I>, srv: Arc<S>) -> anyhow::Result<()>
 where
     C: Send + Sync + Default,
     I: wrpc::Invoke<Context = C> + 'static,
     S: wrpc::Serve<Context = C> + Send + 'static,
 {
+    let span = Span::current();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let shutdown_rx = async move { shutdown_rx.await.expect("shutdown sender dropped") }.shared();
     try_join!(
         async {
-            wrpc::generate!({
-                inline: "
-                        package wrpc-test:integration;
-
-                        interface shared {
-                            flags abc {
-                                a,
-                                b,
-                                c,
-                            }
-
-                            fallible: func() -> result<bool, string>;
-                            numbers: func() -> tuple<u8, u16, u32, u64, s8, s16, s32, s64, f32, f64>;
-                            with-flags: func() -> abc;
-
-                            resource counter {
-                                constructor(initial: u32);
-                                clone-counter: func() -> counter;
-
-                                get-count: func() -> u32;
-                                increment-by: func(num: u32);
-
-                                sum: static func(a: borrow<counter>, b: borrow<counter>) -> u32;
-                            }
-                        }
-
-                        interface async {
-                            record something {
-                                foo: string,
-                            }
-
-                            with-streams: func() -> (bytes: stream<u8>, lists: stream<list<string>>);
-                            with-future: func(x: something, s: stream<u8>) -> future<stream<u8>>;
-                        }
-
-                        world test {
-                            export shared;
-                            export async;
-
-                            export f: func(x: string) -> u32;
-                            export foo: interface {
-                                foo: func(x: string);
-                            }
-                        }"
+            wit_bindgen_wrpc::generate!({
+                world: "async-server",
+                path: "tests/wit",
             });
 
-            use exports::wrpc_test::integration::shared::Counter;
+            #[derive(Clone, Default)]
+            struct Component {}
+
+            impl<C: Send + Sync> exports::wrpc_test::integration::async_::Handler<C> for Component {
+                async fn with_streams(
+                    &self,
+                    _cx: C,
+                ) -> anyhow::Result<(
+                    Pin<Box<dyn Stream<Item = Bytes> + Send>>,
+                    Pin<Box<dyn Stream<Item = Vec<Vec<String>>> + Send>>,
+                )> {
+                    Ok((
+                        Box::pin(stream::iter([Bytes::from("test")])),
+                        Box::pin(stream::iter([
+                            vec![vec!["foo".to_string()]],
+                            vec![vec!["bar".to_string(), "baz".to_string()]],
+                        ])),
+                    ))
+                }
+
+                async fn with_future(
+                    &self,
+                    _cx: C,
+                    x: exports::wrpc_test::integration::async_::Something,
+                    s: Pin<Box<dyn Stream<Item = Bytes> + Send>>,
+                ) -> anyhow::Result<
+                    Pin<Box<dyn Future<Output = Pin<Box<dyn Stream<Item = Bytes> + Send>>> + Send>>,
+                > {
+                    assert_eq!(x.foo, "bar");
+                    Ok(Box::pin(async { s }))
+                }
+
+                async fn identity_nested_async(
+                    &self,
+                    _cx: C,
+                    v: Pin<
+                        Box<
+                            (dyn Future<
+                                Output = Pin<
+                                    Box<
+                                        (dyn Future<
+                                            Output = Pin<
+                                                Box<
+                                                    (dyn Future<
+                                                        Output = Pin<
+                                                            Box<
+                                                                (dyn Stream<Item = Vec<String>>
+                                                                     + Send
+                                                                     + 'static),
+                                                            >,
+                                                        >,
+                                                    > + Send
+                                                         + 'static),
+                                                >,
+                                            >,
+                                        > + Send
+                                             + 'static),
+                                    >,
+                                >,
+                            > + Send
+                                 + 'static),
+                        >,
+                    >,
+                ) -> anyhow::Result<
+                    Pin<
+                        Box<
+                            (dyn Future<
+                                Output = Pin<
+                                    Box<
+                                        (dyn Future<
+                                            Output = Pin<
+                                                Box<
+                                                    (dyn Future<
+                                                        Output = Pin<
+                                                            Box<
+                                                                (dyn Stream<Item = Vec<String>>
+                                                                     + Send
+                                                                     + 'static),
+                                                            >,
+                                                        >,
+                                                    > + Send
+                                                         + 'static),
+                                                >,
+                                            >,
+                                        > + Send
+                                             + 'static),
+                                    >,
+                                >,
+                            > + Send
+                                 + 'static),
+                        >,
+                    >,
+                > {
+                    Ok(v)
+                }
+            }
+
+            let srv = Arc::clone(&srv);
+            let shutdown_rx = shutdown_rx.clone();
+            tokio::spawn(async move {
+                let invocations = serve(srv.as_ref(), Component::default())
+                    .await
+                    .context("failed to serve `wrpc-test:integration/async`")?;
+                let mut invocations = stream::select_all(invocations.into_iter().map(
+                    |(instance, name, invocations)| {
+                        invocations.map(move |res| (instance, name, res))
+                    },
+                ));
+                loop {
+                    let shutdown_rx = shutdown_rx.clone();
+                    select! {
+                        Some((instance, name, invocation)) = invocations.next() => {
+                            info!(instance, name, "serving invocation");
+                            invocation
+                                .unwrap_or_else(|err| panic!("failed to accept `{instance}#{name}` invocation: {err:?}"))
+                                .await
+                                .expect("failed to serve invocation");
+                        }
+                        () = shutdown_rx => {
+                            info!("shutting down");
+                            return anyhow::Ok(())
+                        }
+                    }
+                }
+            }.instrument(span.clone()))
+            .await?
+        },
+        async {
+            wit_bindgen_wrpc::generate!({
+                world: "async-client",
+                path: "tests/wit",
+            });
+
+            // TODO: Remove the need for this
+            sleep(Duration::from_secs(1)).await;
+
+            assert_async(clt.as_ref()).await?;
+
+            shutdown_tx.send(()).expect("failed to send shutdown");
+            Ok(())
+        },
+    )?;
+    Ok(())
+}
+
+#[instrument(skip_all, ret)]
+async fn assert_bindgen_sync<C, I, S>(clt: Arc<I>, srv: Arc<S>) -> anyhow::Result<()>
+where
+    C: Send + Sync + Default,
+    I: wrpc::Invoke<Context = C> + 'static,
+    S: wrpc::Serve<Context = C> + Send + 'static,
+{
+    let span = Span::current();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let shutdown_rx = async move { shutdown_rx.await.expect("shutdown sender dropped") }.shared();
+    try_join!(
+        async {
+            mod bindings {
+                wit_bindgen_wrpc::generate!({
+                    inline: "
+                       package wrpc-test:integration;
+
+                       interface shared {
+                           flags abc {
+                               a,
+                               b,
+                               c,
+                           }
+
+                           fallible: func() -> result<bool, string>;
+                           numbers: func() -> tuple<u8, u16, u32, u64, s8, s16, s32, s64, f32, f64>;
+                           with-flags: func() -> abc;
+
+                           resource counter {
+                               constructor(initial: u32);
+                               clone-counter: func() -> counter;
+
+                               get-count: func() -> u32;
+                               increment-by: func(num: u32);
+
+                               sum: static func(a: borrow<counter>, b: borrow<counter>) -> u32;
+                           }
+                       }
+
+                       world test {
+                           export shared;
+
+                           export f: func(x: string) -> u32;
+                           export foo: interface {
+                               foo: func(x: string);
+                           }
+                       }"
+                });
+            }
+
+            use bindings::exports;
+            use bindings::exports::wrpc_test::integration::shared::Counter;
 
             #[derive(Clone, Default)]
             struct Component {
@@ -195,7 +350,7 @@ where
                 }
             }
 
-            impl<C: Send + Sync> Handler<C> for Component {
+            impl<C: Send + Sync> bindings::Handler<C> for Component {
                 async fn f(&self, _cx: C, x: String) -> anyhow::Result<u32> {
                     let stored = self.inner.read().await.as_ref().unwrap().to_string();
                     assert_eq!(stored, x);
@@ -236,36 +391,6 @@ where
                 }
             }
 
-            impl<C: Send + Sync> exports::wrpc_test::integration::async_::Handler<C> for Component {
-                async fn with_streams(
-                    &self,
-                    _cx: C,
-                ) -> anyhow::Result<(
-                    Pin<Box<dyn Stream<Item = Bytes> + Send>>,
-                    Pin<Box<dyn Stream<Item = Vec<Vec<String>>> + Send>>,
-                )> {
-                    Ok((
-                        Box::pin(stream::iter([Bytes::from("test")])),
-                        Box::pin(stream::iter([
-                            vec![vec!["foo".to_string()]],
-                            vec![vec!["bar".to_string(), "baz".to_string()]],
-                        ])),
-                    ))
-                }
-
-                async fn with_future(
-                    &self,
-                    _cx: C,
-                    x: exports::wrpc_test::integration::async_::Something,
-                    s: Pin<Box<dyn Stream<Item = Bytes> + Send>>,
-                ) -> anyhow::Result<
-                    Pin<Box<dyn Future<Output = Pin<Box<dyn Stream<Item = Bytes> + Send>>> + Send>>,
-                > {
-                    assert_eq!(x.foo, "bar");
-                    Ok(Box::pin(async { s }))
-                }
-            }
-
             impl<C: Send + Sync> exports::foo::Handler<C> for Component {
                 async fn foo(&self, _cx: C, x: String) -> anyhow::Result<()> {
                     let old = self.inner.write().await.replace(x);
@@ -277,7 +402,7 @@ where
             let srv = Arc::clone(&srv);
             let shutdown_rx = shutdown_rx.clone();
             tokio::spawn(async move {
-                let mut invocations = serve(srv.as_ref(), Component::default())
+                let invocations = bindings::serve(srv.as_ref(), Component::default())
                     .await
                     .context("failed to serve `wrpc-test:integration/test`")?;
                 let mut invocations = stream::select_all(invocations.into_iter().map(
@@ -290,7 +415,10 @@ where
                     select! {
                         Some((instance, name, invocation)) = invocations.next() => {
                             info!(instance, name, "serving invocation");
-                            invocation.expect("failed to accept invocation").await.expect("failed to serve invocation");
+                            invocation
+                                .unwrap_or_else(|err| panic!("failed to accept `{instance}#{name}` invocation: {err:?}"))
+                                .await
+                                .expect("failed to serve invocation");
                         }
                         () = shutdown_rx => {
                             info!("shutting down");
@@ -300,56 +428,51 @@ where
                 }
             })
             .await?
-        },
+        }.instrument(span.clone()),
         async {
-            wrpc::generate!({
-                inline: "
-                        package wrpc-test:integration;
+            mod bindings {
+                wit_bindgen_wrpc::generate!({
+                    inline: "
+                       package wrpc-test:integration;
 
-                        interface shared {
-                            flags abc {
-                                a,
-                                b,
-                                c,
-                            }
+                       interface shared {
+                           flags abc {
+                               a,
+                               b,
+                               c,
+                           }
 
-                            fallible: func() -> result<bool, string>;
-                            numbers: func() -> tuple<u8, u16, u32, u64, s8, s16, s32, s64, f32, f64>;
-                            with-flags: func() -> abc;
+                           fallible: func() -> result<bool, string>;
+                           numbers: func() -> tuple<u8, u16, u32, u64, s8, s16, s32, s64, f32, f64>;
+                           with-flags: func() -> abc;
 
-                            resource counter {
-                                constructor(initial: u32);
-                                clone-counter: func() -> counter;
+                           resource counter {
+                               constructor(initial: u32);
+                               clone-counter: func() -> counter;
 
-                                get-count: func() -> u32;
-                                increment-by: func(num: u32);
+                               get-count: func() -> u32;
+                               increment-by: func(num: u32);
 
-                                sum: static func(a: borrow<counter>, b: borrow<counter>) -> u32;
-                            }
-                        }
+                               sum: static func(a: borrow<counter>, b: borrow<counter>) -> u32;
+                           }
+                       }
 
-                        interface async {
-                            record something {
-                                foo: string,
-                            }
+                       world test {
+                           import shared;
 
-                            with-streams: func() -> (bytes: stream<u8>, lists: stream<list<string>>);
-                            with-future: func(x: something, s: stream<u8>) -> future<stream<u8>>;
-                        }
-
-                        world test {
-                            import shared;
-                            import async;
-
-                            import f: func(x: string) -> u32;
-                            import foo: interface {
-                                foo: func(x: string);
-                            }
-                            export bar: interface {
-                                bar: func() -> string;
-                            }
-                        }"
-            });
+                           import f: func(x: string) -> u32;
+                           import foo: interface {
+                               foo: func(x: string);
+                           }
+                           export bar: interface {
+                               bar: func() -> string;
+                           }
+                       }"
+                });
+            }
+            use bindings::{exports, foo, f};
+            use bindings::wrpc_test::integration::shared;
+            use bindings::wrpc_test::integration::shared::Counter;
 
             struct Component<T>(Arc<T>);
 
@@ -368,7 +491,7 @@ where
                 T: wrpc::Invoke<Context = C>,
             {
                 async fn bar(&self, _cx: C) -> anyhow::Result<String> {
-                    use wrpc_test::integration::shared::Abc;
+                    use shared::Abc;
 
                     info!("calling `wrpc-test:integration/test.foo.f`");
                     foo::foo(self.0.as_ref(), C::default(), "foo")
@@ -382,13 +505,13 @@ where
                     assert_eq!(v, 42);
 
                     info!("calling `wrpc-test:integration/shared.fallible`");
-                    let v = wrpc_test::integration::shared::fallible(self.0.as_ref(), C::default())
+                    let v = shared::fallible(self.0.as_ref(), C::default())
                         .await
                         .context("failed to call `wrpc-test:integration/shared.fallible`")?;
                     assert_eq!(v, Ok(true));
 
                     info!("calling `wrpc-test:integration/shared.numbers`");
-                    let v = wrpc_test::integration::shared::numbers(self.0.as_ref(), C::default())
+                    let v = shared::numbers(self.0.as_ref(), C::default())
                         .await
                         .context("failed to call `wrpc-test:integration/shared.numbers`")?;
                     assert_eq!(
@@ -409,12 +532,12 @@ where
 
                     info!("calling `wrpc-test:integration/shared.with-flags`");
                     let v =
-                        wrpc_test::integration::shared::with_flags(self.0.as_ref(), C::default())
+                        shared::with_flags(self.0.as_ref(), C::default())
                             .await
                             .context("failed to call `wrpc-test:integration/shared.with-flags`")?;
                     assert_eq!(v, Abc::A | Abc::C);
 
-                    let counter = wrpc_test::integration::shared::Counter::new(
+                    let counter = Counter::new(
                         self.0.as_ref(),
                         C::default(),
                         0,
@@ -425,11 +548,11 @@ where
                     )?;
                     let counter_borrow = counter.as_borrow();
 
-                    wrpc_test::integration::shared::Counter::increment_by(self.0.as_ref(), C::default(), &counter_borrow, 1)
+                    Counter::increment_by(self.0.as_ref(), C::default(), &counter_borrow, 1)
                             .await
                             .context("failed to call `wrpc-test:integration/shared.[method]counter-increment-by`")?;
 
-                    let count = wrpc_test::integration::shared::Counter::get_count(
+                    let count = Counter::get_count(
                         self.0.as_ref(),
                         C::default(),
                         &counter_borrow,
@@ -440,11 +563,11 @@ where
                     )?;
                     assert_eq!(count, 1);
 
-                    wrpc_test::integration::shared::Counter::increment_by(self.0.as_ref(), C::default(), &counter_borrow, 2)
+                    Counter::increment_by(self.0.as_ref(), C::default(), &counter_borrow, 2)
                             .await
                             .context("failed to call `wrpc-test:integration/shared.[method]counter-increment-by`")?;
 
-                    let count = wrpc_test::integration::shared::Counter::get_count(
+                    let count = Counter::get_count(
                         self.0.as_ref(),
                         C::default(),
                         &counter_borrow,
@@ -455,12 +578,12 @@ where
                     )?;
                     assert_eq!(count, 3);
 
-                    let second_counter = wrpc_test::integration::shared::Counter::clone_counter(self.0.as_ref(), C::default(), &counter_borrow)
+                    let second_counter = Counter::clone_counter(self.0.as_ref(), C::default(), &counter_borrow)
                             .await
                             .context("failed to call `wrpc-test:integration/shared.[method]counter-clone-counter`")?;
 
                     let second_counter_borrow = second_counter.as_borrow();
-                    let sum = wrpc_test::integration::shared::Counter::sum(
+                    let sum = Counter::sum(
                         self.0.as_ref(),
                         C::default(),
                         &counter_borrow,
@@ -470,62 +593,13 @@ where
                     .context("failed to call `wrpc-test:integration/shared.[static]counter-sum")?;
                     assert_eq!(sum, 6);
 
-                    info!("calling `wrpc-test:integration/async.with-streams`");
-                    let (a, b, io) =
-                        wrpc_test::integration::async_::with_streams(self.0.as_ref(), C::default())
-                            .await
-                            .context("failed to call `wrpc-test:integration/async.with-streams`")?;
-                    join!(
-                        async {
-                            info!("receiving `a`");
-                            assert_eq!(a.collect::<Vec<Bytes>>().await.concat(), b"test");
-                        },
-                        async {
-                            info!("receiving `b`");
-                            assert_eq!(
-                                b.collect::<Vec<_>>().await.concat(),
-                                [["foo"].as_slice(), ["bar", "baz"].as_slice()]
-                            );
-                        },
-                        async {
-                            if let Some(io) = io {
-                                info!("performing I/O");
-                                io.await.expect("failed to complete async I/O");
-                            }
-                        }
-                    );
-
-                    info!("calling `wrpc-test:integration/async.with-future`");
-                    let (fut, io) = wrpc_test::integration::async_::with_future(
-                        self.0.as_ref(),
-                        C::default(),
-                        &wrpc_test::integration::async_::Something {
-                            foo: "bar".to_string(),
-                        },
-                        Box::pin(stream::iter(["foo".into(), "bar".into()])),
-                    )
-                    .await
-                    .context("failed to call `wrpc-test:integration/async.with-future`")?;
-                    join!(
-                        async {
-                            info!("receiving results");
-                            assert_eq!(fut.await.collect::<Vec<Bytes>>().await.concat(), b"foobar");
-                        },
-                        async {
-                            if let Some(io) = io {
-                                info!("performing I/O");
-                                io.await.expect("failed to complete async I/O");
-                            }
-                        }
-                    );
-
                     Ok("bar".to_string())
                 }
             }
 
-            let mut invocations = serve(srv.as_ref(), Component(Arc::clone(&clt)))
+            let invocations = bindings::serve(srv.as_ref(), Component(Arc::clone(&clt)))
                 .await
-                .context("failed to serve `wrpc-test:integration/async`")?;
+                .context("failed to serve `wrpc-test:integration/test`")?;
             let mut invocations = stream::select_all(invocations.into_iter().map(
                 |(instance, name, invocations)| invocations.map(move |res| (instance, name, res)),
             ));
@@ -536,7 +610,10 @@ where
                     select! {
                         Some((instance, name, invocation)) = invocations.next() => {
                             info!(instance, name, "serving invocation");
-                            invocation.expect("failed to accept invocation").await.expect("failed to serve invocation");
+                            invocation
+                                .unwrap_or_else(|err| panic!("failed to accept `{instance}#{name}` invocation: {err:?}"))
+                                .await
+                                .expect("failed to serve invocation");
                         }
                         () = shutdown_rx => {
                             info!("shutting down");
@@ -544,20 +621,23 @@ where
                         }
                     }
                 }
-            })
+            }.instrument(span.clone()))
             .await?
-        },
+        }.instrument(span.clone()),
         async {
-            wrpc::generate!({
-                inline: "
-                        package wrpc-test:integration;
+            mod bindings {
+                wit_bindgen_wrpc::generate!({
+                    inline: "
+                       package wrpc-test:integration;
 
-                        world test {
-                            import bar: interface {
-                                bar: func() -> string;
-                            }
-                        }"
-            });
+                       world test {
+                           import bar: interface {
+                               bar: func() -> string;
+                           }
+                       }"
+                });
+            }
+            use bindings::bar;
 
             // TODO: Remove the need for this
             sleep(Duration::from_secs(2)).await;
@@ -568,7 +648,7 @@ where
             assert_eq!(v, "bar");
             shutdown_tx.send(()).expect("failed to send shutdown");
             Ok(())
-        },
+        }.instrument(span.clone()),
     )?;
     Ok(())
 }
@@ -576,7 +656,7 @@ where
 #[instrument(skip_all, ret)]
 async fn assert_dynamic<C, I, S>(clt: Arc<I>, srv: Arc<S>) -> anyhow::Result<()>
 where
-    C: Send + Sync + Default,
+    C: Send + Sync + Default + 'static,
     I: wrpc::Invoke<Context = C>,
     S: wrpc::Serve<Context = C>,
 {
@@ -598,12 +678,75 @@ where
         )
         .await
         .context("failed to serve `test.async`")?;
+    let reset_inv = srv
+        .serve_values::<(String,), (String,)>("test", "reset", Box::default())
+        .await
+        .context("failed to serve `test.reset`")?;
     let sync_inv = srv
-        .serve_values("test", "sync", [Box::default(); 0])
+        .serve_values("test", "sync", Box::default())
         .await
         .context("failed to serve `test.sync`")?;
+
     let mut async_inv = pin!(async_inv);
+    let mut reset_inv = pin!(reset_inv);
     let mut sync_inv = pin!(sync_inv);
+
+    join!(
+        async {
+            info!("receiving `test.reset` parameters");
+            _ = reset_inv
+                .try_next()
+                .await
+                .expect("failed to accept invocation")
+                .expect("unexpected end of stream");
+            info!("receiving `test.reset` parameters");
+            _ = reset_inv
+                .try_next()
+                .await
+                .expect("failed to accept invocation")
+                .expect("unexpected end of stream");
+            let inv = reset_inv
+                .try_next()
+                .await
+                .expect("failed to accept invocation")
+                .expect("unexpected end of stream");
+            thread::spawn(|| inv);
+        }
+        .instrument(info_span!("server")),
+        async {
+            info!("invoking `test.reset`");
+            clt.invoke_values_blocking::<_, _, (String,)>(
+                C::default(),
+                "test",
+                "reset",
+                ("arg",),
+                &[[]; 0],
+            )
+            .await
+            .expect_err("`test.reset` should have failed");
+            info!("invoking `test.reset`");
+            clt.invoke_values_blocking::<_, _, (String,)>(
+                C::default(),
+                "test",
+                "reset",
+                ("arg",),
+                &[[]; 0],
+            )
+            .await
+            .expect_err("`test.reset` should have failed");
+            info!("invoking `test.reset`");
+            clt.invoke_values_blocking::<_, _, (String,)>(
+                C::default(),
+                "test",
+                "reset",
+                ("arg",),
+                &[[]; 0],
+            )
+            .await
+            .expect_err("`test.reset` should have failed");
+        }
+        .instrument(info_span!("client")),
+    );
 
     join!(
         async {
@@ -613,7 +756,7 @@ where
                 .await
                 .expect("failed to accept invocation")
                 .expect("unexpected end of stream");
-            let (a, b, c, d, e, f, g, h, i, j, k, l, m, n): (
+            let (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o): (
                 bool,
                 u8,
                 u16,
@@ -628,6 +771,7 @@ where
                 char,
                 String,
                 Vec<Vec<Vec<u8>>>,
+                Vec<Option<Vec<Result<Option<String>, ()>>>>,
             ) = params;
             assert!(rx.is_none());
             assert!(a);
@@ -644,6 +788,7 @@ where
             assert_eq!(l, 'a');
             assert_eq!(m, "test");
             assert_eq!(n, [[b"foo"]]);
+            assert_eq!(o, [Some(vec![Ok(Some(String::from("bar")))])]);
             info!("transmitting `test.sync` returns");
             tx((
                 true,
@@ -660,6 +805,7 @@ where
                 'a',
                 "test",
                 vec![vec!["foo".as_bytes()]],
+                vec![Some(vec![Ok::<_, ()>(Some(String::from("bar")))])],
             ))
             .await
             .expect("failed to send response");
@@ -689,12 +835,13 @@ where
                         ),
                         "test",
                         vec![vec!["foo".as_bytes()]],
+                        vec![Some(vec![Ok::<_, ()>(Some(String::from("bar")))])],
                     ),
                     &[[]; 0],
                 )
                 .await
                 .expect("failed to invoke `test.sync`");
-            let (a, b, c, d, e, f, g, h, i, j, k, l, m, n): (
+            let (a, b, c, d, e, f, g, h, i, j, k, l, m, n, o): (
                 bool,
                 u8,
                 u16,
@@ -709,6 +856,7 @@ where
                 char,
                 String,
                 Vec<Vec<Vec<u8>>>,
+                Vec<Option<Vec<Result<Option<String>, ()>>>>,
             ) = returns;
             assert!(a);
             assert_eq!(b, 0xfe);
@@ -724,7 +872,7 @@ where
             assert_eq!(l, 'a');
             assert_eq!(m, "test");
             assert_eq!(n, [[b"foo"]]);
-            info!("finishing `test.sync` session");
+            assert_eq!(o, [Some(vec![Ok(Some(String::from("bar")))])]);
         }
         .instrument(info_span!("client")),
     );
@@ -776,7 +924,9 @@ where
                 async {
                     if let Some(io) = io {
                         info!("performing I/O");
-                        io.await.expect("failed to complete async I/O");
+                        io.await
+                            .expect("I/O task panicked")
+                            .expect("failed to complete async I/O");
                     }
                 }
             );
@@ -861,18 +1011,45 @@ where
         }
         .instrument(info_span!("client")),
     );
+
     Ok(())
 }
 
 #[cfg(feature = "nats")]
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[instrument(ret)]
-async fn rust_bindgen_nats() -> anyhow::Result<()> {
-    common::with_nats(|_, nats_client| async {
-        let client =
-            wrpc_transport_nats::Client::new(nats_client, "test-prefix", Some("test-group".into()));
-        let client = Arc::new(client);
-        assert_bindgen(Arc::clone(&client), client).await
+async fn rust_bindgen_nats_sync() -> anyhow::Result<()> {
+    wrpc_test::with_nats(|_, nats_client| async {
+        let clt = wrpc_transport_nats::Client::new(
+            nats_client,
+            "rust-bindgen-sync",
+            Some("rust-bindgen-sync".into()),
+        )
+        .await
+        .context("failed to construct client")?;
+        let clt = Arc::new(clt);
+        assert_bindgen_sync(Arc::clone(&clt), clt).await
+    })
+    .await
+}
+
+#[cfg(feature = "nats")]
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[instrument(ret)]
+async fn rust_bindgen_nats_async() -> anyhow::Result<()> {
+    wrpc_test::with_nats(|_, nats_client| {
+        async {
+            let clt = wrpc_transport_nats::Client::new(
+                nats_client,
+                "rust-bindgen-async",
+                Some("rust-bindgen-async".into()),
+            )
+            .await
+            .context("failed to construct client")?;
+            let clt = Arc::new(clt);
+            assert_bindgen_async(Arc::clone(&clt), clt).await
+        }
+        .in_current_span()
     })
     .await
 }
@@ -881,10 +1058,12 @@ async fn rust_bindgen_nats() -> anyhow::Result<()> {
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[instrument(ret)]
 async fn rust_dynamic_nats() -> anyhow::Result<()> {
-    common::with_nats(|_, nats_client| async {
-        let client = wrpc_transport_nats::Client::new(nats_client, "test-prefix", None);
-        let client = Arc::new(client);
-        assert_dynamic(Arc::clone(&client), client).await
+    wrpc_test::with_nats(|_, nats_client| async {
+        let clt = wrpc_transport_nats::Client::new(nats_client, "rust-dynamic", None)
+            .await
+            .context("failed to construct client")?;
+        let clt = Arc::new(clt);
+        assert_dynamic(Arc::clone(&clt), clt).await
     })
     .await
 }
@@ -892,39 +1071,64 @@ async fn rust_dynamic_nats() -> anyhow::Result<()> {
 #[cfg(feature = "quic")]
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[instrument(ret)]
-async fn rust_bindgen_quic() -> anyhow::Result<()> {
-    use core::net::Ipv6Addr;
+async fn rust_bindgen_quic_sync() -> anyhow::Result<()> {
     use core::pin::pin;
 
-    common::with_quic(
-        &[
-            "*.wrpc-test_integration__async",
-            "*.wrpc-test_integration__bar",
-            "*.wrpc-test_integration__foo",
-            "*.wrpc-test_integration__shared",
-            "*.wrpc-test_integration__test",
-            "*.counter.wrpc-test_integration__shared",
-        ],
-        |port, clt_ep, srv_ep| async move {
-            let clt = wrpc_transport_quic::Client::new(clt_ep, (Ipv6Addr::LOCALHOST, port));
-            let srv = wrpc_transport_quic::Server::default();
+    wrpc_test::with_quic(|clt, srv| {
+        async move {
+            let clt = wrpc_transport_quic::Client::from(clt);
+            let srv_conn = wrpc_transport_quic::Client::from(srv);
+            let srv = Arc::new(wrpc_transport_quic::Server::new());
 
-            let srv = Arc::new(srv);
-            let mut fut = pin!(assert_bindgen(Arc::new(clt), Arc::clone(&srv)));
+            let mut fut = pin!(async {
+                let clt = Arc::new(clt);
+                assert_bindgen_sync(Arc::clone(&clt), Arc::clone(&srv)).await
+            });
             loop {
                 select! {
                     res = &mut fut => {
                         return res
                     }
-                    res = srv.accept(&srv_ep) => {
-                        let ok = res.expect("failed to accept connection");
-                        assert!(ok);
+                    res = srv.accept(&srv_conn) => {
+                        res.expect("failed to accept connection");
                         continue
                     }
                 }
             }
-        },
-    )
+        }
+        .in_current_span()
+    })
+    .await
+}
+
+#[cfg(feature = "quic")]
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[instrument(ret)]
+async fn rust_bindgen_quic_async() -> anyhow::Result<()> {
+    use core::pin::pin;
+
+    wrpc_test::with_quic(|clt, srv| async move {
+        let clt = wrpc_transport_quic::Client::from(clt);
+        let srv_conn = wrpc_transport_quic::Client::from(srv);
+        let srv = Arc::new(wrpc_transport_quic::Server::new());
+
+        let mut fut = pin!(async {
+            let clt = Arc::new(clt);
+            assert_bindgen_async(Arc::clone(&clt), Arc::clone(&srv)).await
+        }
+        .in_current_span());
+        loop {
+            select! {
+                res = &mut fut => {
+                    return res
+                }
+                res = srv.accept(&srv_conn) => {
+                    res.expect("failed to accept connection");
+                    continue
+                }
+            }
+        }
+    })
     .await
 }
 
@@ -932,31 +1136,274 @@ async fn rust_bindgen_quic() -> anyhow::Result<()> {
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 #[instrument(ret)]
 async fn rust_dynamic_quic() -> anyhow::Result<()> {
-    use core::net::Ipv6Addr;
     use core::pin::pin;
 
-    common::with_quic(
-        &["sync.test", "async.test"],
-        |port, clt_ep, srv_ep| async move {
-            let clt = wrpc_transport_quic::Client::new(clt_ep, (Ipv6Addr::LOCALHOST, port));
-            let srv = wrpc_transport_quic::Server::default();
+    use tracing::Span;
 
-            let srv = Arc::new(srv);
+    let span = Span::current();
+    wrpc_test::with_quic(|clt, srv| {
+        async move {
+            let clt = wrpc_transport_quic::Client::from(clt);
+            let srv_conn = wrpc_transport_quic::Client::from(srv);
+            let srv = Arc::new(wrpc_transport_quic::Server::new());
+
             let mut fut = pin!(assert_dynamic(Arc::new(clt), Arc::clone(&srv)));
             loop {
                 select! {
                     res = &mut fut => {
                         return res
                     }
-                    res = srv.accept(&srv_ep) => {
-                        let ok = res.expect("failed to accept connection");
-                        assert!(ok);
+                    res = srv.accept(&srv_conn) => {
+                        res.expect("failed to accept connection");
                         continue
                     }
                 }
             }
-            Ok(())
-        },
-    )
+        }
+        .instrument(span)
+    })
     .await
+}
+
+#[cfg(feature = "web-transport")]
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[instrument(ret)]
+async fn rust_bindgen_web_transport_sync() -> anyhow::Result<()> {
+    use core::pin::pin;
+
+    wrpc_test::with_web_transport(|clt, srv| {
+        async move {
+            let clt = wrpc_transport_web::Client::from(clt);
+            let srv_conn = wrpc_transport_web::Client::from(srv);
+            let srv = Arc::new(wrpc_transport_web::Server::new());
+
+            let mut fut = pin!(async {
+                let clt = Arc::new(clt);
+                assert_bindgen_sync(Arc::clone(&clt), Arc::clone(&srv)).await
+            });
+            loop {
+                select! {
+                    res = &mut fut => {
+                        return res
+                    }
+                    res = srv.accept(&srv_conn) => {
+                        res.expect("failed to accept connection");
+                        continue
+                    }
+                }
+            }
+        }
+        .in_current_span()
+    })
+    .await
+}
+
+#[cfg(feature = "web-transport")]
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[instrument(ret)]
+async fn rust_bindgen_web_transport_async() -> anyhow::Result<()> {
+    use core::pin::pin;
+
+    wrpc_test::with_web_transport(|clt, srv| async move {
+        let clt = wrpc_transport_web::Client::from(clt);
+        let srv_conn = wrpc_transport_web::Client::from(srv);
+        let srv = Arc::new(wrpc_transport_web::Server::new());
+
+        let mut fut = pin!(async {
+            let clt = Arc::new(clt);
+            assert_bindgen_async(Arc::clone(&clt), Arc::clone(&srv)).await
+        }
+        .in_current_span());
+        loop {
+            select! {
+                res = &mut fut => {
+                    return res
+                }
+                res = srv.accept(&srv_conn) => {
+                    res.expect("failed to accept connection");
+                    continue
+                }
+            }
+        }
+    })
+    .await
+}
+
+#[cfg(feature = "web-transport")]
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[instrument(ret)]
+async fn rust_dynamic_web_transport() -> anyhow::Result<()> {
+    use core::pin::pin;
+
+    use tracing::Span;
+
+    let span = Span::current();
+    wrpc_test::with_web_transport(|clt, srv| {
+        async move {
+            let clt = wrpc_transport_web::Client::from(clt);
+            let srv_conn = wrpc_transport_web::Client::from(srv);
+            let srv = Arc::new(wrpc_transport_web::Server::new());
+
+            let mut fut = pin!(assert_dynamic(Arc::new(clt), Arc::clone(&srv)));
+            loop {
+                select! {
+                    res = &mut fut => {
+                        return res
+                    }
+                    res = srv.accept(&srv_conn) => {
+                        res.expect("failed to accept connection");
+                        continue
+                    }
+                }
+            }
+        }
+        .instrument(span)
+    })
+    .await
+}
+
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[instrument(ret)]
+async fn rust_bindgen_tcp_sync() -> anyhow::Result<()> {
+    use core::net::Ipv6Addr;
+    use core::pin::pin;
+
+    use tracing::Span;
+    use wrpc_transport::frame::AcceptExt as _;
+
+    let lis = tokio::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+        .await
+        .context("failed to start TCP listener")?;
+    let lis = lis.map_context(|addr| assert!(addr.ip().is_loopback()));
+    let addr = lis.local_addr().context("failed to get server address")?;
+
+    let srv = Arc::new(wrpc_transport::frame::Server::default());
+    let clt = wrpc_transport::frame::tcp::Client::from(addr);
+    let span = Span::current();
+    let mut fut = pin!(
+        async { assert_bindgen_sync(Arc::new(clt), Arc::clone(&srv),).await }
+            .instrument(span.clone())
+    );
+    loop {
+        select! {
+            res = &mut fut => {
+                return res
+            }
+            res = srv.accept(&lis).instrument(span.clone()) => {
+                res.expect("failed to accept connection");
+                continue
+            }
+        }
+    }
+}
+
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[instrument(ret)]
+async fn rust_bindgen_tcp_async() -> anyhow::Result<()> {
+    use core::net::Ipv6Addr;
+    use core::pin::pin;
+
+    use tracing::Span;
+    use wrpc_transport::frame::AcceptExt as _;
+
+    let lis = tokio::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+        .await
+        .context("failed to start TCP listener")?;
+    let lis = lis.map_context(|addr| assert!(addr.ip().is_loopback()));
+    let addr = lis.local_addr().context("failed to get server address")?;
+
+    let srv = Arc::new(wrpc_transport::frame::Server::default());
+    let clt = wrpc_transport::frame::tcp::Client::from(addr);
+    let span = Span::current();
+    let mut fut = pin!(
+        async { assert_bindgen_async(Arc::new(clt), Arc::clone(&srv),).await }
+            .instrument(span.clone())
+    );
+    loop {
+        select! {
+            res = &mut fut => {
+                return res
+            }
+            res = srv.accept(&lis).instrument(span.clone()) => {
+                res.expect("failed to accept connection");
+                continue
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[instrument(ret)]
+async fn rust_bindgen_uds_sync() -> anyhow::Result<()> {
+    use core::pin::pin;
+
+    use std::path::PathBuf;
+
+    use tempfile::NamedTempFile;
+    use tracing::Span;
+    use wrpc_transport::frame::AcceptExt as _;
+
+    let tmp = NamedTempFile::new().context("failed to create temporary file")?;
+    let path = PathBuf::from(&tmp.into_temp_path());
+
+    let lis = tokio::net::UnixListener::bind(&path).context("failed to bind Unix listener")?;
+    let lis = lis.map_context(|addr| assert!(addr.is_unnamed()));
+
+    let srv = Arc::new(wrpc_transport::frame::Server::default());
+    let clt = wrpc_transport::frame::unix::Client::from(path);
+    let span = Span::current();
+    let mut fut = pin!(
+        async { assert_bindgen_sync(Arc::new(clt), Arc::clone(&srv),).await }
+            .instrument(span.clone())
+    );
+    loop {
+        select! {
+            res = &mut fut => {
+                return res
+            }
+            res = srv.accept(&lis).instrument(span.clone()) => {
+                res.expect("failed to accept connection");
+                continue
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test_log::test(tokio::test(flavor = "multi_thread"))]
+#[instrument(ret)]
+async fn rust_bindgen_uds_async() -> anyhow::Result<()> {
+    use core::pin::pin;
+
+    use std::path::PathBuf;
+
+    use tempfile::NamedTempFile;
+    use tracing::Span;
+    use wrpc_transport::frame::AcceptExt as _;
+
+    let tmp = NamedTempFile::new().context("failed to create temporary file")?;
+    let path = PathBuf::from(&tmp.into_temp_path());
+
+    let lis = tokio::net::UnixListener::bind(&path).context("failed to bind Unix listener")?;
+    let lis = lis.map_context(|addr| assert!(addr.is_unnamed()));
+
+    let srv = Arc::new(wrpc_transport::frame::Server::default());
+    let clt = wrpc_transport::frame::unix::Client::from(path);
+    let span = Span::current();
+    let mut fut = pin!(
+        async { assert_bindgen_async(Arc::new(clt), Arc::clone(&srv),).await }
+            .instrument(span.clone())
+    );
+    loop {
+        select! {
+            res = &mut fut => {
+                return res
+            }
+            res = srv.accept(&lis).instrument(span.clone()) => {
+                res.expect("failed to accept connection");
+                continue
+            }
+        }
+    }
 }

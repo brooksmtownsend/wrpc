@@ -1,49 +1,48 @@
 package wrpc
 
 import (
+	"bufio"
 	"context"
-	"errors"
-	"fmt"
 	"io"
 )
 
+// Invoke is the client-side transport handle
 type Invoker interface {
-	Invoke(ctx context.Context, instance string, name string, f func(IndexWriter, IndexReadCloser) error, subs ...SubscribePath) error
+	// Invoke invokes a function `name` within an instance `instance`.
+	// Initial, encoded payload must be specified in `b`.
+	// `paths` define the async result paths to subscribe on.
+	// On success, `Invoke` returns two handles used for writing and reading encoded parameters and results respectively.
+	// NOTE: if the returned handle is used for writing, `b` must be non-empty.
+	Invoke(ctx context.Context, instance string, name string, b []byte, paths ...SubscribePath) (IndexWriteCloser, IndexReadCloser, error)
 }
 
+type HandleFunc func(context.Context, IndexWriteCloser, IndexReadCloser)
+
+// Server is the server-side transport handle
 type Server interface {
-	Serve(instance string, name string, f func(context.Context, IndexWriter, IndexReadCloser) error, subs ...SubscribePath) (func() error, error)
+	// Serve serves a function `name` within an instance `instance`.
+	// `paths` define the async parameter paths to subscribe on.
+	// `Serve` will call `f` with two handles used for writing and reading encoded results and parameters respectively.
+	// On success, `Serve` returns a function, which can be called to stop serving.
+	Serve(instance string, name string, f HandleFunc, paths ...SubscribePath) (func() error, error)
 }
 
 // Own is an owned resource handle
-type Own[T any] string
+type Own[T any] []byte
 
-func (v Own[T]) Drop(ctx context.Context, c Invoker) error {
-	if v == "" {
-		return errors.New("cannot drop a resource without an ID")
-	}
-	return c.Invoke(ctx, string(v), "drop", func(w IndexWriter, r IndexReadCloser) error {
-		_, err := w.Write(nil)
-		if err != nil {
-			return fmt.Errorf("failed to write empty `drop` parameters")
-		}
-		_, err = r.Read(nil)
-		if err != nil {
-			return fmt.Errorf("failed to read empty `drop` result")
-		}
-		return nil
-	})
-}
-
+// Borrow returns the handle as a [`Borrow`]
 func (v Own[T]) Borrow() Borrow[T] {
 	return Borrow[T](v)
 }
 
 // Borrow is a borrowed resource handle
-type Borrow[T any] string
+type Borrow[T any] []byte
 
+// SubscribePath is the subscription path.
+// `nil` represents a wildcard index used for dynamically-sized values, like `list`
 type SubscribePath []*uint32
 
+// NewSubscribePath creates a new subscription path.
 func NewSubscribePath(ps ...*uint32) SubscribePath {
 	return SubscribePath(ps)
 }
@@ -52,14 +51,18 @@ func (p SubscribePath) push(v *uint32) SubscribePath {
 	return SubscribePath(append(append(make(SubscribePath, 0, len(p)+1), p...), v))
 }
 
+// Index pushes a `uint32` index to the path
 func (p SubscribePath) Index(i uint32) SubscribePath {
 	return p.push(&i)
 }
 
+// Wildcard pushes a wildcard index to the path used for dynamically-sized values, like `list`
 func (p SubscribePath) Wildcard() SubscribePath {
 	return p.push(nil)
 }
 
+// Parent pops the last element in the path and returns the resulting path and `true` and success.
+// It returns `nil`, `false` otherwise.
 func (p SubscribePath) Parent() (SubscribePath, bool) {
 	n := len(p)
 	if n == 0 {
@@ -68,6 +71,7 @@ func (p SubscribePath) Parent() (SubscribePath, bool) {
 	return SubscribePath(p[:n-1]), true
 }
 
+// Index represents entities, which can be indexed by concrete `uint32` paths, for example transport streams.
 type Index[T any] interface {
 	Index(path ...uint32) (T, error)
 }
@@ -76,18 +80,23 @@ type IndexReader interface {
 	io.Reader
 	io.ByteReader
 
-	Index[IndexReader]
+	Index[IndexReadCloser]
 }
 
 type IndexWriter interface {
 	io.Writer
 	io.ByteWriter
 
-	Index[IndexWriter]
+	Index[IndexWriteCloser]
 }
 
 type IndexReadCloser interface {
 	IndexReader
+	io.Closer
+}
+
+type IndexWriteCloser interface {
+	IndexWriter
 	io.Closer
 }
 
@@ -101,43 +110,14 @@ type ByteReader interface {
 	io.Reader
 }
 
-type Completer interface {
-	IsComplete() bool
-}
-
 type Receiver[T any] interface {
 	Receive() (T, error)
+	io.Closer
 }
 
-type ReceiveCompleter[T any] interface {
-	Receiver[T]
-	Completer
-}
-
-type ReadCompleter interface {
-	io.Reader
-	Completer
-}
-
-type ByteReadCompleter interface {
+type ByteReadCloser interface {
 	ByteReader
-	Completer
-}
-
-type PendingReceiver[T any] struct {
-	Receiver[T]
-}
-
-func (r *PendingReceiver[T]) Receive() (T, error) {
-	return r.Receiver.Receive()
-}
-
-func (*PendingReceiver[T]) IsComplete() bool {
-	return false
-}
-
-func NewPendingReceiver[T any](rx Receiver[T]) *PendingReceiver[T] {
-	return &PendingReceiver[T]{rx}
+	io.Closer
 }
 
 type CompleteReceiver[T any] struct {
@@ -147,16 +127,19 @@ type CompleteReceiver[T any] struct {
 
 func (r *CompleteReceiver[T]) Receive() (T, error) {
 	defer func() {
-		*r = CompleteReceiver[T]{}
+		r.ready = false
 	}()
 	if !r.ready {
-		return r.v, io.EOF
+		return CompleteReceiver[T]{}.v, io.EOF
 	}
 	return r.v, nil
 }
 
-func (*CompleteReceiver[T]) IsComplete() bool {
-	return true
+func (r *CompleteReceiver[T]) Close() error {
+	if c, ok := (any)(r.v).(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
 }
 
 func NewCompleteReceiver[T any](v T) *CompleteReceiver[T] {
@@ -164,26 +147,39 @@ func NewCompleteReceiver[T any](v T) *CompleteReceiver[T] {
 }
 
 type DecodeReceiver[T any] struct {
-	r      IndexReader
-	decode func(IndexReader) (T, error)
+	r      IndexReadCloser
+	decode func(IndexReadCloser) (T, error)
 }
 
 func (r *DecodeReceiver[T]) Receive() (T, error) {
 	return r.decode(r.r)
 }
 
-func (*DecodeReceiver[T]) IsComplete() bool {
-	return false
-}
-
 func (r *DecodeReceiver[T]) Close() error {
-	c, ok := r.r.(io.Closer)
-	if ok {
-		return c.Close()
-	}
-	return nil
+	return r.r.Close()
 }
 
-func NewDecodeReceiver[T any](r IndexReader, decode func(IndexReader) (T, error)) *DecodeReceiver[T] {
+func NewDecodeReceiver[T any](r IndexReadCloser, decode func(IndexReadCloser) (T, error)) *DecodeReceiver[T] {
 	return &DecodeReceiver[T]{r, decode}
+}
+
+type nestedReceiver[T any, A Receiver[B], B Receiver[T]] struct {
+	rx A
+}
+
+func (r nestedReceiver[T, A, B]) Receive() (Receiver[T], error) {
+	return r.rx.Receive()
+}
+
+func (r nestedReceiver[T, A, B]) Close() error {
+	return r.rx.Close()
+}
+
+func NewNestedReceiver[T any, A Receiver[B], B Receiver[T]](rx A) Receiver[Receiver[T]] {
+	return nestedReceiver[T, A, B]{rx}
+}
+
+type BufReadCloser struct {
+	*bufio.Reader
+	io.Closer
 }

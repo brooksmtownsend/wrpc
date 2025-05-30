@@ -1,4 +1,4 @@
-//go:generate $WIT_BINDGEN_WRPC go --gofmt=false --world types --out-dir bindings/types --package github.com/bytecodealliance/wrpc/tests/go/bindings/types ../wit
+//go:generate $WIT_BINDGEN_WRPC go --gofmt=false --world types --out-dir bindings/types --package wrpc.io/tests/go/bindings/types ../wit
 
 package integration_test
 
@@ -7,16 +7,15 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-
-	wrpc "github.com/bytecodealliance/wrpc/go"
-	"github.com/bytecodealliance/wrpc/tests/go/bindings/types/wrpc_test/integration/get_types"
+	wrpc "wrpc.io/go"
+	"wrpc.io/tests/go/bindings/types/wrpc_test/integration/get_types"
 )
 
 type indexReader struct {
 	*bytes.Buffer
 }
 
-func (r *indexReader) Index(path ...uint32) (wrpc.IndexReader, error) {
+func (r *indexReader) Index(path ...uint32) (wrpc.IndexReadCloser, error) {
 	panic("not implemented")
 }
 

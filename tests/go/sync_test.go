@@ -1,4 +1,4 @@
-//go:generate $WIT_BINDGEN_WRPC go --gofmt=false --world sync-client --out-dir bindings/sync_client --package github.com/bytecodealliance/wrpc/tests/go/bindings/sync_client ../wit
+//go:generate $WIT_BINDGEN_WRPC go --gofmt=false --world sync-client --out-dir bindings/sync_client --package wrpc.io/tests/go/bindings/sync_client ../wit
 
 package integration_test
 
@@ -9,14 +9,14 @@ import (
 	"testing"
 	"time"
 
-	wrpc "github.com/bytecodealliance/wrpc/go"
-	wrpcnats "github.com/bytecodealliance/wrpc/go/nats"
-	integration "github.com/bytecodealliance/wrpc/tests/go"
-	"github.com/bytecodealliance/wrpc/tests/go/bindings/sync_client/foo"
-	"github.com/bytecodealliance/wrpc/tests/go/bindings/sync_client/wrpc_test/integration/sync"
-	"github.com/bytecodealliance/wrpc/tests/go/bindings/sync_server"
-	"github.com/bytecodealliance/wrpc/tests/go/internal"
 	"github.com/nats-io/nats.go"
+	wrpc "wrpc.io/go"
+	wrpcnats "wrpc.io/go/nats"
+	integration "wrpc.io/tests/go"
+	"wrpc.io/tests/go/bindings/sync_client/foo"
+	"wrpc.io/tests/go/bindings/sync_client/wrpc_test/integration/sync"
+	"wrpc.io/tests/go/bindings/sync_server"
+	"wrpc.io/tests/go/internal"
 )
 
 func TestSync(t *testing.T) {
@@ -33,7 +33,7 @@ func TestSync(t *testing.T) {
 			return
 		}
 	}()
-	client := wrpcnats.NewClient(nc, "go")
+	client := wrpcnats.NewClient(nc, wrpcnats.WithPrefix("go"))
 
 	var h integration.SyncHandler
 	stop, err := sync_server.Serve(client, h, h)
@@ -54,7 +54,7 @@ func TestSync(t *testing.T) {
 
 	{
 		slog.DebugContext(ctx, "calling `wrpc-test:integration/sync-client.foo.f`")
-		v, shutdown, err := foo.F(ctx, client, "f")
+		v, err := foo.F(ctx, client, "f")
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/sync-client.foo.f`: %s", err)
 			return
@@ -63,26 +63,18 @@ func TestSync(t *testing.T) {
 			t.Errorf("expected: 42, got: %d", v)
 			return
 		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
-			return
-		}
 	}
 	{
 		slog.DebugContext(ctx, "calling `wrpc-test:integration/sync-client.foo.foo`")
-		shutdown, err := foo.Foo(ctx, client, "foo")
+		err := foo.Foo(ctx, client, "foo")
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/sync-client.foo.foo`: %s", err)
-			return
-		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
 			return
 		}
 	}
 	{
 		slog.DebugContext(ctx, "calling `wrpc-test:integration/sync.fallible`")
-		v, shutdown, err := sync.Fallible(ctx, client, true)
+		v, err := sync.Fallible(ctx, client, true)
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/sync.fallible`: %s", err)
 			return
@@ -92,14 +84,10 @@ func TestSync(t *testing.T) {
 			t.Errorf("expected: %#v, got: %#v", expected, v)
 			return
 		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
-			return
-		}
 	}
 	{
 		slog.DebugContext(ctx, "calling `wrpc-test:integration/sync.fallible`")
-		v, shutdown, err := sync.Fallible(ctx, client, false)
+		v, err := sync.Fallible(ctx, client, false)
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/sync.fallible`: %s", err)
 			return
@@ -109,31 +97,58 @@ func TestSync(t *testing.T) {
 			t.Errorf("expected: %#v, got: %#v", expected, v)
 			return
 		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
-			return
-		}
 	}
 	{
 		slog.DebugContext(ctx, "calling `wrpc-test:integration/sync.numbers`")
-		v, shutdown, err := sync.Numbers(ctx, client)
+		v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, err := sync.Numbers(ctx, client)
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/sync.numbers`: %s", err)
 			return
 		}
-		expected := &wrpc.Tuple10[uint8, uint16, uint32, uint64, int8, int16, int32, int64, float32, float64]{V0: 1, V1: 2, V2: 3, V3: 4, V4: 5, V5: 6, V6: 7, V7: 8, V8: 9, V9: 10}
-		if !reflect.DeepEqual(v, expected) {
-			t.Errorf("expected: %v, got: %#v", expected, v)
+		if v0 != 1 {
+			t.Errorf("expected: 1, got: %#v", v0)
 			return
 		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
+		if v1 != 2 {
+			t.Errorf("expected: 2, got: %#v", v1)
+			return
+		}
+		if v2 != 3 {
+			t.Errorf("expected: 3, got: %#v", v2)
+			return
+		}
+		if v3 != 4 {
+			t.Errorf("expected: 4, got: %#v", v3)
+			return
+		}
+		if v4 != 5 {
+			t.Errorf("expected: 5, got: %#v", v4)
+			return
+		}
+		if v5 != 6 {
+			t.Errorf("expected: 6, got: %#v", v5)
+			return
+		}
+		if v6 != 7 {
+			t.Errorf("expected: 7, got: %#v", v6)
+			return
+		}
+		if v7 != 8 {
+			t.Errorf("expected: 8, got: %#v", v7)
+			return
+		}
+		if v8 != 9 {
+			t.Errorf("expected: 9, got: %#v", v8)
+			return
+		}
+		if v9 != 10 {
+			t.Errorf("expected: 10, got: %#v", v9)
 			return
 		}
 	}
 	{
 		slog.DebugContext(ctx, "calling `wrpc-test:integration/sync.with-flags`")
-		v, shutdown, err := sync.WithFlags(ctx, client, true, false, true)
+		v, err := sync.WithFlags(ctx, client, true, false, true)
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/sync.with-flags`: %s", err)
 			return
@@ -143,13 +158,9 @@ func TestSync(t *testing.T) {
 			t.Errorf("expected: %v, got: %#v", expected, v)
 			return
 		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
-			return
-		}
 	}
 	{
-		v, shutdown, err := sync.WithVariantOption(ctx, client, true)
+		v, err := sync.WithVariantOption(ctx, client, true)
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/sync.with-variant-option`: %s", err)
 			return
@@ -163,13 +174,9 @@ func TestSync(t *testing.T) {
 			t.Errorf("expected: %v, got: %#v", expected, v)
 			return
 		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
-			return
-		}
 	}
 	{
-		v, shutdown, err := sync.WithVariantOption(ctx, client, false)
+		v, err := sync.WithVariantOption(ctx, client, false)
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/sync.with-variant-option`: %s", err)
 			return
@@ -179,13 +186,9 @@ func TestSync(t *testing.T) {
 			t.Errorf("expected: %v, got: %#v", expected, v)
 			return
 		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
-			return
-		}
 	}
 	{
-		v, shutdown, err := sync.WithVariantList(ctx, client)
+		v, err := sync.WithVariantList(ctx, client)
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/sync.with-variant-list`: %s", err)
 			return
@@ -210,13 +213,9 @@ func TestSync(t *testing.T) {
 			t.Errorf("expected: %v, got: %#v", expected, v)
 			return
 		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
-			return
-		}
 	}
 	{
-		v, shutdown, err := sync.WithRecord(ctx, client)
+		v, err := sync.WithRecord(ctx, client)
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/sync.with-record`: %s", err)
 			return
@@ -230,13 +229,9 @@ func TestSync(t *testing.T) {
 			t.Errorf("expected: %v, got: %#v", expected, v)
 			return
 		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
-			return
-		}
 	}
 	{
-		v, shutdown, err := sync.WithRecordList(ctx, client, 3)
+		v, err := sync.WithRecordList(ctx, client, 3)
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/sync.with-record-list`: %s", err)
 			return
@@ -262,14 +257,13 @@ func TestSync(t *testing.T) {
 			t.Errorf("expected: %v, got: %#v", expected, v)
 			return
 		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
-			return
-		}
 	}
 
 	if err = stop(); err != nil {
 		t.Errorf("failed to stop serving `sync-server` world: %s", err)
 		return
+	}
+	if nc.NumSubscriptions() != 0 {
+		t.Errorf("NATS subscriptions leaked: %d active after client stop", nc.NumSubscriptions())
 	}
 }

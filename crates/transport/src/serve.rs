@@ -1,4 +1,7 @@
+//! wRPC transport server handle
+
 use core::future::Future;
+use core::mem;
 use core::pin::Pin;
 
 use std::sync::Arc;
@@ -9,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt as _};
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tracing::{debug, instrument, trace, Instrument as _, Span};
 
-use crate::{Deferred as _, Index, TupleDecode, TupleEncode};
+use crate::{Deferred as _, Incoming, Index, TupleDecode, TupleEncode};
 
 /// Server-side handle to a wRPC transport
 pub trait Serve: Sync {
@@ -37,6 +40,7 @@ pub trait Serve: Sync {
     > + Send;
 }
 
+/// Extension trait for [Serve]
 pub trait ServeExt: Serve {
     /// Serve function `func` from instance `instance` using typed `Params` and `Results`
     #[instrument(level = "trace", skip(self, paths))]
@@ -71,9 +75,9 @@ pub trait ServeExt: Serve {
         <Results::Encoder as tokio_util::codec::Encoder<Results>>::Error:
             std::error::Error + Send + Sync + 'static,
     {
+        let span = Span::current();
         async {
             let invocations = self.serve(instance, func, paths).await?;
-            let span = Span::current();
             Ok(invocations.and_then(move |(cx, outgoing, incoming)| {
                 async {
                     let mut dec = FramedRead::new(incoming, Params::Decoder::default());
@@ -87,11 +91,20 @@ pub trait ServeExt: Serve {
                     };
                     trace!("received sync parameters");
                     let rx = dec.decoder_mut().take_deferred();
+                    let buffer = mem::take(dec.read_buffer_mut());
                     let span = Span::current();
                     Ok((
                         cx,
                         params,
-                        rx.map(|f| f(dec.into_inner().into(), Vec::with_capacity(8))),
+                        rx.map(|f| {
+                            f(
+                                Incoming {
+                                    buffer,
+                                    inner: dec.into_inner(),
+                                },
+                                Vec::default(),
+                            )
+                        }),
                         move |results| {
                             Box::pin(
                                 async {
@@ -109,7 +122,7 @@ pub trait ServeExt: Serve {
                                         .context("failed to shutdown synchronous return channel")?;
                                     if let Some(tx) = tx {
                                         debug!("transmitting async results");
-                                        tx(outgoing.into(), Vec::with_capacity(8))
+                                        tx(outgoing, Vec::default())
                                             .await
                                             .context("failed to write async results")?;
                                     }

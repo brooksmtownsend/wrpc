@@ -1,4 +1,7 @@
+//! wRPC transport client handle
+
 use core::future::Future;
+use core::mem;
 use core::pin::pin;
 use core::time::Duration;
 
@@ -10,7 +13,7 @@ use tokio::{select, try_join};
 use tokio_util::codec::{Encoder as _, FramedRead};
 use tracing::{debug, instrument, trace, Instrument as _};
 
-use crate::{Deferred as _, Index, TupleDecode, TupleEncode};
+use crate::{Deferred as _, Incoming, Index, TupleDecode, TupleEncode};
 
 /// Client-side handle to a wRPC transport
 pub trait Invoke: Send + Sync {
@@ -62,7 +65,6 @@ pub trait Invoke: Send + Sync {
     ///     async { T::default().invoke((), "compiler-bug", "free", "since".into(), [[Some(2024)].as_slice(); 0]).send().await }
     /// }
     /// ```
-
     fn invoke<P>(
         &self,
         cx: Self::Context,
@@ -75,9 +77,12 @@ pub trait Invoke: Send + Sync {
         P: AsRef<[Option<usize>]> + Send + Sync;
 }
 
+/// Wrapper struct returned by [`InvokeExt::timeout`]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Timeout<'a, T: ?Sized> {
+    /// Inner [Invoke]
     pub inner: &'a T,
+    /// Invocation timeout
     pub timeout: Duration,
 }
 
@@ -107,9 +112,12 @@ impl<T: Invoke> Invoke for Timeout<'_, T> {
     }
 }
 
+/// Wrapper struct returned by [`InvokeExt::timeout_owned`]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimeoutOwned<T> {
+    /// Inner [Invoke]
     pub inner: T,
+    /// Invocation timeout
     pub timeout: Duration,
 }
 
@@ -137,6 +145,7 @@ impl<T: Invoke> Invoke for TimeoutOwned<T> {
     }
 }
 
+/// Extension trait for [Invoke]
 pub trait InvokeExt: Invoke {
     /// Invoke function `func` on instance `instance` using typed `Params` and `Results`
     #[instrument(level = "trace", skip(self, cx, params, paths))]
@@ -173,6 +182,7 @@ pub trait InvokeExt: Invoke {
                 .invoke(cx, instance, func, buf.freeze(), paths)
                 .await
                 .context("failed to invoke function")?;
+            trace!("shutdown synchronous parameter channel");
             outgoing
                 .shutdown()
                 .await
@@ -181,7 +191,7 @@ pub trait InvokeExt: Invoke {
                 tokio::spawn(
                     async {
                         debug!("transmitting async parameters");
-                        tx(outgoing.into(), Vec::with_capacity(8))
+                        tx(outgoing, Vec::default())
                             .await
                             .context("failed to write async parameters")
                     }
@@ -213,7 +223,12 @@ pub trait InvokeExt: Invoke {
                 results.await?
             };
             trace!("received sync results");
+            let buffer = mem::take(dec.read_buffer_mut());
             let rx = dec.decoder_mut().take_deferred();
+            let incoming = Incoming {
+                buffer,
+                inner: dec.into_inner(),
+            };
             Ok((
                 results,
                 (tx.is_some() || rx.is_some()).then_some(
@@ -223,7 +238,7 @@ pub trait InvokeExt: Invoke {
                                 try_join!(
                                     async {
                                         debug!("receiving async results");
-                                        rx(dec.into_inner().into(), Vec::with_capacity(8))
+                                        rx(incoming, Vec::default())
                                             .await
                                             .context("receiving async results failed")
                                     },
@@ -237,7 +252,7 @@ pub trait InvokeExt: Invoke {
                             }
                             (None, Some(rx)) => {
                                 debug!("receiving async results");
-                                rx(dec.into_inner().into(), Vec::with_capacity(8))
+                                rx(incoming, Vec::default())
                                     .await
                                     .context("receiving async results failed")?;
                             }
@@ -276,6 +291,7 @@ pub trait InvokeExt: Invoke {
                 .invoke_values(cx, instance, func, params, paths)
                 .await?;
             if let Some(io) = io {
+                trace!("awaiting I/O completion");
                 io.await?;
             }
             Ok(ret)

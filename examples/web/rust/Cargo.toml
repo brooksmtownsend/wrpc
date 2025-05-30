@@ -1,0 +1,61 @@
+[package]
+name = "wasi-keyvalue-web"
+version = "0.1.0"
+
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+async-nats = { workspace = true }
+axum = { workspace = true, features = ["tokio", "http1", "http2"] }
+bytes = { workspace = true }
+clap = { workspace = true, features = [
+    "color",
+    "derive",
+    "error-context",
+    "help",
+    "std",
+    "suggestions",
+    "usage",
+] }
+futures = { workspace = true }
+quinn = { workspace = true, features = [
+    "log",
+    "platform-verifier",
+    "ring",
+    "runtime-tokio",
+    "rustls",
+] }
+rustls = { workspace = true, features = ["ring"] }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "net",
+] }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["fs", "trace"] }
+tracing = { workspace = true, features = ["attributes"] }
+tracing-subscriber = { workspace = true, features = [
+    "ansi",
+    "env-filter",
+    "fmt",
+    "smallvec",
+    "tracing-log",
+] }
+url = { workspace = true }
+uuid = { workspace = true, features = ["std", "v7"] }
+wit-bindgen-wrpc = { workspace = true }
+wrpc-transport = { workspace = true, features = ["net"] }
+wrpc-transport-nats = { workspace = true, features = ["async-nats-0_41"] }
+wrpc-transport-quic = { workspace = true }
+wrpc-transport-web = { workspace = true }
+wrpc-wasi-keyvalue = { workspace = true }
+wrpc-wasi-keyvalue-mem = { workspace = true }
+wrpc-wasi-keyvalue-redis = { workspace = true }
+wtransport = { workspace = true, features = ["self-signed"] }

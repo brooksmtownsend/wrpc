@@ -37,56 +37,198 @@ For static use cases, wRPC provides [WIT] binding generators for:
 
 wRPC fully supports the unreleased native [WIT] `stream` and `future` data types along with all currently released WIT functionality.
 
-## Design
+See [specification](./SPEC.md) for more info.
 
-### Transport
+## Installation
 
-wRPC transport is the core abstraction on top of which all the other functionality is built.
+- Using [`cargo`](https://doc.rust-lang.org/cargo/index.html):
 
-A transport represents a multiplexed bidirectional communication channel, over which wRPC invocations are transmitted.
+    ```sh
+    cargo install wrpc
+    ```
 
-wRPC operates under assumption that transport communication channels can be "indexed" by a sequence of unsigned 32-bit integers, which represent a reflective structural path.
+- Using [`nix`](https://zero-to-nix.com/start/install):
 
-### Invocation
+    ```sh
+    nix profile install github:bytecodealliance/wrpc
+    ```
 
-As part of every wRPC invocation at least 2 independent, directional byte streams will be established by the chosen transport:
+    or, without installing:
+    ```
+    nix shell github:bytecodealliance/wrpc
+    ```
 
-- parameters (client -> server)
-- results (server -> client)
+- You can also download individual binaries from the [release page](https://github.com/bytecodealliance/wrpc/releases)
 
-wRPC transport implementations MAY (and are encouraged to) provide two more directional communication channels:
+## Quickstart
 
-- client error (client -> server)
-- server error (server -> client)
+wRPC usage examples for different programming languages can be found at [examples](./examples).
 
-Error channels are the only channels that are *typed*, in particular, values sent on these channels are *strings*.
+There are 2 different kinds of examples:
+- Native wRPC applications, tied to a particular wRPC transport (like Unix Domain Sockets, TCP, QUIC or [NATS.io])
+- Generic Wasm components, that need to run in a Wasm runtime. Those can be executed, for example, using `wrpc-wasmtime`, to polyfill imports at runtime and serve exports using wRPC.
 
-If `async` values are being transmitted as parameters or results of an invocation, wRPC MAY send those values on an indexed path asynchronously.
+### Requirements
 
-Consider the invocation of [WIT] function `foo` from instance `wrpc-example:doc/example@0.1.0`:
+- For Rust components and wRPC applications: `rust` >= 1.82
 
-```wit
-package wrpc-example:doc@0.1.0;
+- For [NATS.io] transport: `nats-server` >= 2.10.20 or [`docker`](https://www.docker.com/) >= 24.0.6 (or any other OCI runtime)
 
-interface example {
-    record rec {
-        a: stream<u8>,
-        b: u32,
-    }
+Nix users can run `nix develop` anywhere in the repository to get all dependencies correctly set up
 
-    foo: func(v: rec) -> stream<u8>;
-}
-```
+### `hello` example
 
-1. Since `foo` parameter `0` is a `record`, which contains an `async` type (`stream`) as the first field, wRPC will communicate to the transport that apart from the "root" parameter channel, it may need to receive results at index path `0` (first return value).
-2. wRPC will encode the parameters as a single-element tuple in a non-blocking fashion. If full contents of `rec.a` are not available at the time of encoding, the stream will be encoded as `option::none`.
-5. (concurrently, if in `2.` stream was not fully available) wRPC will transfer the contents of the `stream<u8>` on parameter byte stream at index `0->0` (first field of the record, which is the first parameter) as they become available.
-4. wRPC will attempt to decode `stream<u8>` from the "root" result byte stream.
-5. (if `4.` decoded an `option::none` for the `stream` value) wRPC will attempt to decode `stream<u8>` from result byte stream at index `0`
+In this example we will serve and invoke a simple [`hello`](./examples/wit/hello/hello.wit) application.
 
-Note, that the *handler* of `foo` (server) MAY:
-- receive `rec.b` value before `rec.a` is sent or even available
-- send a result back to the *invoker* of `foo` (client) *before* it has received `rec.a`
+#### Rust components
+
+We will use the following two Rust components:
+- [examples/rust/hello-component-client](examples/rust/hello-component-client)
+- [examples/rust/hello-component-server](examples/rust/hello-component-server)
+
+We will have to build these components first:
+
+- Build Wasm `hello` client:
+
+    ```sh
+    cargo build --release -p hello-component-client --target wasm32-wasip2
+    ```
+
+    > Output is in target/wasm32-wasip2/release/hello-component-client.wasm
+
+- Build Wasm `hello` server:
+
+    ```sh
+    cargo build --release -p hello-component-server --target wasm32-wasip2
+    ```
+    
+    > Output is in target/wasm32-wasip2/release/hello_component_server.wasm
+
+    > NB: Rust uses `_` separators in the filename, because a component is built as a reactor-style library
+
+#### Using TCP transport
+
+We will use the following two Rust wRPC applications using TCP transport:
+- [examples/rust/hello-tcp-client](examples/rust/hello-tcp-client)
+- [examples/rust/hello-tcp-server](examples/rust/hello-tcp-server)
+
+> `[::1]:7761` is used as the default address
+
+1. Serve Wasm `hello` server via TCP
+
+    ```sh
+    wrpc-wasmtime tcp serve ./target/wasm32-wasip2/release/hello_component_server.wasm
+    ```
+
+    - Sample output:
+    > INFO wrpc_wasmtime_cli: serving instance function name="hello"
+
+3. Call Wasm `hello` server using a Wasm `hello` client via TCP:
+
+    ```sh
+    wrpc-wasmtime tcp run ./target/wasm32-wasip2/release/hello-component-client.wasm
+    ```
+
+    - Sample output in the client:
+    >hello from Rust
+
+    - Sample output in the server:
+    > INFO wrpc_wasmtime_cli: serving instance function invocation
+    >
+    > INFO wrpc_wasmtime_cli: successfully served instance function invocation
+
+4. Call the Wasm `hello` server using a native wRPC `hello` client via TCP:
+
+    ```sh
+    cargo run -p hello-tcp-client
+    ```
+
+5. Serve native wRPC `hello` server via TCP:
+
+    ```sh
+    cargo run -p hello-tcp-server [::1]:7762
+    ```
+
+6. Call native wRPC `hello` server using native wRPC `hello` client via TCP:
+
+    ```sh
+    cargo run -p hello-tcp-client [::1]:7762
+    ```
+
+7. Call native wRPC `hello` server using Wasm `hello` client via TCP:
+
+    ```sh
+    wrpc-wasmtime tcp run --import [::1]:7762 ./target/wasm32-wasip2/release/hello-component-client.wasm
+    ```
+
+#### Using [NATS.io] transport
+
+We will use the following two Rust wRPC applications using [NATS.io] transport:
+- [examples/rust/hello-nats-client](examples/rust/hello-nats-client)
+- [examples/rust/hello-nats-server](examples/rust/hello-nats-server)
+
+1. Run [NATS.io] (more thorough documentation available [here](https://docs.nats.io/running-a-nats-service/introduction/running)):
+
+    - using standalone binary:
+    ```sh
+    nats-server
+    ```
+    
+    - using [Docker]:
+    ```sh
+    docker run --rm -it --name nats-server -p 4222:4222 nats:2.10.20-alpine3.20
+    ```
+
+2. Serve Wasm `hello` server via [NATS.io]
+
+    ```sh
+    wrpc-wasmtime nats serve --export rust ./target/wasm32-wasip2/release/hello_component_server.wasm
+    ```
+    
+    - Sample output:
+    > INFO async_nats: event: connected
+    >
+    > INFO wrpc_wasmtime_cli: serving instance function name="hello"
+
+3. Call Wasm `hello` server using a Wasm `hello` client via [NATS.io]:
+
+    ```sh
+    wrpc-wasmtime nats run --import rust ./target/wasm32-wasip2/release/hello-component-client.wasm
+    ```
+    
+    - Sample output in the client:
+    > INFO async_nats: event: connected
+    >
+    >hello from Rust
+    
+    - Sample output in the server:
+    > INFO wrpc_wasmtime_cli: serving instance function invocation
+    >
+    > INFO wrpc_wasmtime_cli: successfully served instance function invocation
+
+4. Call the Wasm `hello` server using a native wRPC `hello` client via [NATS.io]:
+
+    ```sh
+    cargo run -p hello-nats-client rust
+    ```
+
+5. Serve native wRPC `hello` server via [NATS.io]:
+
+    ```sh
+    cargo run -p hello-nats-server native
+    ```
+
+6. Call both the native wRPC `hello` server and Wasm `hello` server using native wRPC `hello` client via [NATS.io]:
+
+    ```sh
+    cargo run -p hello-nats-client rust native
+    ```
+
+7. Call native wRPC `hello` server using Wasm `hello` client via [NATS.io]:
+
+    ```sh
+    wrpc-wasmtime nats run --import native ./target/wasm32-wasip2/release/hello-component-client.wasm
+    ```
 
 ## Repository structure
 
@@ -108,8 +250,9 @@ This repository contains (for all supported languages):
 
 ## Contributing
 
-[![GitHub repo Good Issues for newbies](https://img.shields.io/github/bytecodealliance/issues/wrpc/good%20first%20issue?style=flat&logo=github&logoColor=green&label=Good%20First%20issues)](https://github.com/bytecodealliance/wrpc/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22) [![GitHub Help Wanted issues](https://img.shields.io/github/bytecodealliance/issues/wrpc/help%20wanted?style=flat&logo=github&logoColor=b545d1&label=%22Help%20Wanted%22%20issues)](https://github.com/bytecodealliance/wrpc/issues?q=is%3Aopen+is%3Aissue+label%3A%22help+wanted%22) [![GitHub Help Wanted PRs](https://img.shields.io/github/issues-pr/bytecodealliance/wrpc/help%20wanted?style=flat&logo=github&logoColor=b545d1&label=%22Help%20Wanted%22%20PRs)](https://github.com/bytecodealliance/wrpc/pulls?q=is%3Aopen+is%3Aissue+label%3A%22help+wanted%22) [![GitHub repo Issues](https://img.shields.io/github/bytecodealliance/issues/wrpc?style=flat&logo=github&logoColor=red&label=Issues)](https://github.com/bytecodealliance/wrpc/issues?q=is%3Aopen)
-
 👋 **Welcome, new contributors!**
 
 Whether you're a seasoned developer or just getting started, your contributions are valuable to us. Don't hesitate to jump in, explore the project, and make an impact. To start contributing, please check out our [Contribution Guidelines](CONTRIBUTING.md). 
+
+[Docker]: https://www.docker.com/
+[NATS.io]: https://nats.io/

@@ -11,6 +11,7 @@ async fn go_bindgen() -> anyhow::Result<()> {
     use core::time::Duration;
 
     use anyhow::{anyhow, bail};
+    use common::assert_async;
     use tokio::fs;
     use tokio::time::sleep;
     use tracing::info;
@@ -40,15 +41,18 @@ async fn go_bindgen() -> anyhow::Result<()> {
         .context("failed to call `go test`")?;
     ensure!(status.success(), "`go test` failed");
 
-    common::with_nats(|port, nats_client| async move {
-        wrpc::generate!({
-            world: "sync-client",
-            path: "tests/wit",
-            additional_derives: [::core::cmp::PartialEq],
-        });
+    wrpc_test::with_nats(|port, nats_client| async move {
+        mod bindings {
+            wit_bindgen_wrpc::generate!({
+                world: "sync-client",
+                path: "tests/wit",
+                additional_derives: [::core::cmp::PartialEq],
+            });
+        }
 
-        use wrpc_test::integration::sync;
-        use wrpc_test::integration::sync::{Abc, Foobar, Rec, RecNested, Var};
+        use bindings::foo;
+        use bindings::wrpc_test::integration::sync;
+        use bindings::wrpc_test::integration::sync::{Abc, Foobar, Rec, RecNested, Var};
 
         info!("starting `sync-server-nats`");
         let mut server = Command::new("go")
@@ -62,7 +66,9 @@ async fn go_bindgen() -> anyhow::Result<()> {
             .spawn()
             .context("failed to run `sync-server-nats`")?;
 
-        let client = wrpc_transport_nats::Client::new(nats_client, "go", None);
+        let client = wrpc_transport_nats::Client::new(nats_client, "go", None)
+            .await
+            .context("failed to construct client")?;
 
         // TODO: Remove the need for this
         sleep(Duration::from_secs(1)).await;
@@ -234,7 +240,42 @@ async fn go_bindgen() -> anyhow::Result<()> {
 
         Ok(())
     })
-    .await
+    .await?;
+
+    wrpc_test::with_nats(|port, nats_client| async move {
+        info!("starting `async-server-nats`");
+        let mut server = Command::new("go")
+            .current_dir("tests/go")
+            .args([
+                "run",
+                "./cmd/async-server-nats",
+                &format!("nats://localhost:{port}"),
+            ])
+            .kill_on_drop(true)
+            .spawn()
+            .context("failed to run `async-server-nats`")?;
+
+        // TODO: Remove the need for this
+        sleep(Duration::from_secs(1)).await;
+
+        let client = wrpc_transport_nats::Client::new(nats_client, "go", None)
+            .await
+            .context("failed to construct client")?;
+        assert_async(&client).await?;
+
+        server
+            .start_kill()
+            .context("failed to kill `async-server-nats`")?;
+        server
+            .wait_with_output()
+            .await
+            .context("failed to wait for `async-server-nats` to exit")?;
+
+        Ok(())
+    })
+    .await?;
+
+    Ok(())
 }
 
 #[instrument(ret)]

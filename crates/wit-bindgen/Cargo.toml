@@ -1,6 +1,6 @@
 [package]
 name = "wit-bindgen-wrpc"
-version = "0.6.3"
+version = "0.10.0"
 description = """
 Rust bindings generator for wRPC.
 """
@@ -16,7 +16,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-anyhow = { workspace = true }
+anyhow = { workspace = true, features = ["std"] }
 bitflags = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }

@@ -1,0 +1,72 @@
+[package]
+name = "wrpc-wasmtime-cli"
+version = "0.7.0"
+description = "wRPC Wasmtime CLI"
+
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+async-nats = { workspace = true }
+clap = { workspace = true, features = [
+    "color",
+    "derive",
+    "error-context",
+    "help",
+    "std",
+    "suggestions",
+    "usage",
+] }
+futures = { workspace = true }
+humantime = { workspace = true }
+reqwest = { workspace = true }
+semver = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
+tokio-util = { workspace = true, features = ["codec"] }
+tracing = { workspace = true, features = ["attributes"] }
+url = { workspace = true }
+wasi-preview1-component-adapter-provider = { workspace = true }
+wasmparser = { workspace = true }
+wasmtime = { workspace = true, features = [
+    "addr2line",
+    "async",
+    "cache",
+    "component-model",
+    "coredump",
+    "cranelift",
+    "debug-builtins",
+    "demangle",
+    "gc",
+    "gc-drc",
+    "gc-null",
+    "parallel-compilation",
+    "pooling-allocator",
+    "profiling",
+    "runtime",
+    "threads",
+    "wat",
+] }
+wasmtime-cli-flags = { workspace = true, features = [
+    "async",
+    "cache",
+    "component-model",
+    "coredump",
+    "cranelift",
+    "gc",
+    "memory-protection-keys",
+    "parallel-compilation",
+    "pooling-allocator",
+    "threads",
+] }
+wasmtime-wasi = { workspace = true }
+wasmtime-wasi-http = { workspace = true }
+wit-component = { workspace = true }
+wrpc-cli = { workspace = true, features = ["nats"] }
+wrpc-transport-nats = { workspace = true, features = ["async-nats-0_41"] }
+wrpc-transport = { workspace = true, features = ["net"] }
+wrpc-runtime-wasmtime = { workspace = true }

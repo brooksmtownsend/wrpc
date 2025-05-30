@@ -1,12 +1,15 @@
-go 1.22.2
+go 1.24
 
 use (
-	./examples/go/complex-server
 	./examples/go/hello-client
 	./examples/go/hello-server
+	./examples/go/resources-server
+	./examples/go/streams-client
 	./examples/go/streams-server
+	./examples/go/wasi-keyvalue-client
+	./examples/go/wasi-keyvalue-server
 	./go
 	./tests/go
 )
 
-replace github.com/bytecodealliance/wrpc/go v0.0.0-unpublished => ./go
+replace wrpc.io/go v0.2.0 => ./go

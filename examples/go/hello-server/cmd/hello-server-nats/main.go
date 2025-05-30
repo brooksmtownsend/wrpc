@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"log/slog"
@@ -9,17 +8,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	server "github.com/bytecodealliance/wrpc/examples/go/hello-server/bindings"
-	wrpcnats "github.com/bytecodealliance/wrpc/go/nats"
 	"github.com/nats-io/nats.go"
+	app "wrpc.io/examples/go/hello-server"
+	server "wrpc.io/examples/go/hello-server/bindings"
+	wrpcnats "wrpc.io/go/nats"
 )
-
-type Handler struct{}
-
-func (Handler) Hello(ctx context.Context) (string, error) {
-	slog.InfoContext(ctx, "handling `wrpc-examples:hello/handler.hello`")
-	return "hello from Go", nil
-}
 
 func run() (err error) {
 	nc, err := nats.Connect(nats.DefaultURL)
@@ -37,8 +30,8 @@ func run() (err error) {
 		}
 	}()
 
-	wrpc := wrpcnats.NewClient(nc, "go")
-	stop, err := server.Serve(wrpc, Handler{})
+	client := wrpcnats.NewClient(nc, wrpcnats.WithPrefix("go"))
+	stop, err := server.Serve(client, app.Handler{})
 	if err != nil {
 		return fmt.Errorf("failed to serve `server` world: %w", err)
 	}
@@ -51,17 +44,6 @@ func run() (err error) {
 		return fmt.Errorf("failed to stop `server` world: %w", err)
 	}
 	return nil
-}
-
-func init() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo, ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			if a.Key == slog.TimeKey {
-				return slog.Attr{}
-			}
-			return a
-		},
-	})))
 }
 
 func main() {

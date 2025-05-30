@@ -3,12 +3,14 @@ mod bindings {
 
     wit_bindgen::generate!({
        with: {
-           "wasi:keyvalue/store@0.2.0-draft": generate
+           "wasi:keyvalue/store@0.2.0-draft2": generate
        }
     });
 
     export!(Handler);
 }
+
+use core::num::ParseIntError;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -39,6 +41,18 @@ impl Bucket {
     }
 }
 
+impl bindings::exports::wasi::keyvalue::store::Guest for Handler {
+    type Bucket = Bucket;
+
+    fn open(identifier: String) -> Result<store::Bucket> {
+        static STORE: OnceLock<Mutex<HashMap<String, Bucket>>> = OnceLock::new();
+        let store = STORE.get_or_init(Mutex::default);
+        let mut store = store.lock().expect("failed to lock store");
+        let bucket = store.entry(identifier).or_default().clone();
+        Ok(store::Bucket::new(bucket))
+    }
+}
+
 impl bindings::exports::wasi::keyvalue::store::GuestBucket for Bucket {
     fn get(&self, key: String) -> Result<Option<Vec<u8>>> {
         let bucket = self.read()?;
@@ -62,28 +76,17 @@ impl bindings::exports::wasi::keyvalue::store::GuestBucket for Bucket {
         Ok(bucket.contains_key(&key))
     }
 
-    fn list_keys(&self, cursor: Option<u64>) -> Result<KeyResponse> {
+    fn list_keys(&self, cursor: Option<String>) -> Result<KeyResponse> {
         let bucket = self.read()?;
         let bucket = bucket.keys();
         let keys = if let Some(cursor) = cursor {
-            let cursor =
-                usize::try_from(cursor).map_err(|err| store::Error::Other(err.to_string()))?;
+            let cursor = cursor
+                .parse()
+                .map_err(|err: ParseIntError| store::Error::Other(err.to_string()))?;
             bucket.skip(cursor).cloned().collect()
         } else {
             bucket.cloned().collect()
         };
         Ok(KeyResponse { keys, cursor: None })
-    }
-}
-
-impl bindings::exports::wasi::keyvalue::store::Guest for Handler {
-    type Bucket = Bucket;
-
-    fn open(identifier: String) -> Result<store::Bucket> {
-        static STORE: OnceLock<Mutex<HashMap<String, Bucket>>> = OnceLock::new();
-        let store = STORE.get_or_init(Mutex::default);
-        let mut store = store.lock().expect("failed to lock store");
-        let bucket = store.entry(identifier).or_default().clone();
-        Ok(store::Bucket::new(bucket))
     }
 }

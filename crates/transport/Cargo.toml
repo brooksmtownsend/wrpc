@@ -1,6 +1,6 @@
 [package]
 name = "wrpc-transport"
-version = "0.26.7"
+version = "0.28.4"
 description = "wRPC core transport functionality"
 
 authors.workspace = true
@@ -10,8 +10,7 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["frame", "fs", "net", "io-std"]
-frame = []
+default = ["fs", "net", "io-std"]
 fs = ["tokio/fs"]
 net = ["tokio/net"]
 io-std = ["tokio/io-std"]
@@ -20,12 +19,16 @@ io-std = ["tokio/io-std"]
 anyhow = { workspace = true, features = ["std"] }
 bytes = { workspace = true }
 futures = { workspace = true, features = ["std"] }
+pin-project-lite = { workspace = true }
+send-future = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true, features = ["codec", "io"] }
 tracing = { workspace = true, features = ["attributes"] }
-send-future = { workspace = true }
 wasm-tokio = { workspace = true, features = ["tracing"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasi = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 test-log = { workspace = true, features = ["color", "log", "trace"] }

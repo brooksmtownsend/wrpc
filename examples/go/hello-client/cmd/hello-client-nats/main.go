@@ -1,15 +1,14 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"log/slog"
 	"os"
 
-	"github.com/bytecodealliance/wrpc/examples/go/hello-client/bindings/wrpc_examples/hello/handler"
-	wrpcnats "github.com/bytecodealliance/wrpc/go/nats"
 	"github.com/nats-io/nats.go"
+	app "wrpc.io/examples/go/hello-client"
+	wrpcnats "wrpc.io/go/nats"
 )
 
 func run() (err error) {
@@ -27,30 +26,17 @@ func run() (err error) {
 			}
 		}
 	}()
-
-	for _, prefix := range os.Args[1:] {
-		wrpc := wrpcnats.NewClient(nc, prefix)
-		greeting, cleanup, err := handler.Hello(context.Background(), wrpc)
-		if err != nil {
-			return fmt.Errorf("failed to call `wrpc-examples:hello/handler.hello`: %w", err)
-		}
-		fmt.Printf("%s: %s\n", prefix, greeting)
-		if err := cleanup(); err != nil {
-			return fmt.Errorf("failed to shutdown `wrpc-examples:hello/handler.hello` invocation: %w", err)
+	prefixes := os.Args[1:]
+	if len(prefixes) == 0 {
+		prefixes = []string{"go"}
+	}
+	for _, prefix := range prefixes {
+		client := wrpcnats.NewClient(nc, wrpcnats.WithPrefix(prefix))
+		if err := app.Run(prefix, client); err != nil {
+			return err
 		}
 	}
 	return nil
-}
-
-func init() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo, ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			if a.Key == slog.TimeKey {
-				return slog.Attr{}
-			}
-			return a
-		},
-	})))
 }
 
 func main() {

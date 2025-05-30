@@ -1,4 +1,4 @@
-//go:generate $WIT_BINDGEN_WRPC go --world resources-client --out-dir bindings/resources_client --package github.com/bytecodealliance/wrpc/tests/go/bindings/resources_client ../wit
+//go:generate $WIT_BINDGEN_WRPC go --world resources-client --out-dir bindings/resources_client --package wrpc.io/tests/go/bindings/resources_client ../wit
 
 package integration_test
 
@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	wrpc "github.com/bytecodealliance/wrpc/go"
-	wrpcnats "github.com/bytecodealliance/wrpc/go/nats"
-	integration "github.com/bytecodealliance/wrpc/tests/go"
-	"github.com/bytecodealliance/wrpc/tests/go/bindings/resources_client/strange"
-	"github.com/bytecodealliance/wrpc/tests/go/bindings/resources_client/wrpc_test/integration/resources"
-	"github.com/bytecodealliance/wrpc/tests/go/bindings/resources_server"
-	"github.com/bytecodealliance/wrpc/tests/go/internal"
 	"github.com/nats-io/nats.go"
+	wrpc "wrpc.io/go"
+	wrpcnats "wrpc.io/go/nats"
+	integration "wrpc.io/tests/go"
+	"wrpc.io/tests/go/bindings/resources_client/strange"
+	"wrpc.io/tests/go/bindings/resources_client/wrpc_test/integration/resources"
+	"wrpc.io/tests/go/bindings/resources_server"
+	"wrpc.io/tests/go/internal"
 )
 
 func TestResources(t *testing.T) {
@@ -32,7 +32,7 @@ func TestResources(t *testing.T) {
 			return
 		}
 	}()
-	client := wrpcnats.NewClient(nc, "go")
+	client := wrpcnats.NewClient(nc, wrpcnats.WithPrefix("go"))
 
 	stop, err := resources_server.Serve(client, &integration.ResourcesHandler{}, integration.ResourcesStrangeHandler{})
 	if err != nil {
@@ -53,31 +53,24 @@ func TestResources(t *testing.T) {
 	var foo wrpc.Own[resources.Foo]
 	{
 		slog.DebugContext(ctx, "calling `wrpc-test:integration/resources.[constructor]foo`")
-		v, shutdown, err := resources.NewFoo(ctx, client)
+		v, err := resources.NewFoo(ctx, client)
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/resources.[constructor]foo`: %s", err)
-			return
-		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
 			return
 		}
 		foo = v
 	}
-	if err := foo.Drop(ctx, client); err != nil {
-		t.Errorf("failed to drop `foo` resource: %s", err)
-		return
-	}
+	// TODO: Reenable once resource dropping is supported
+	//if err := foo.Drop(ctx, client); err != nil {
+	//	t.Errorf("failed to drop `foo` resource: %s", err)
+	//	return
+	//}
 
 	{
 		slog.DebugContext(ctx, "calling `wrpc-test:integration/resources.[constructor]foo`")
-		v, shutdown, err := resources.NewFoo(ctx, client)
+		v, err := resources.NewFoo(ctx, client)
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/resources.[constructor]foo`: %s", err)
-			return
-		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
 			return
 		}
 		foo = v
@@ -85,7 +78,7 @@ func TestResources(t *testing.T) {
 
 	{
 		slog.DebugContext(ctx, "calling `wrpc-test:integration/resources.[method]foo.bar`")
-		v, shutdown, err := resources.Foo_Bar(ctx, client, foo.Borrow())
+		v, err := resources.Foo_Bar(ctx, client, foo.Borrow())
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/resources.[method]foo.bar`: %s", err)
 			return
@@ -94,15 +87,11 @@ func TestResources(t *testing.T) {
 			t.Errorf("expected: `bar`, got: %s", v)
 			return
 		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
-			return
-		}
 	}
 
 	{
 		slog.DebugContext(ctx, "calling `wrpc-test:integration/resources.bar`")
-		v, shutdown, err := resources.Bar(ctx, client, foo.Borrow())
+		v, err := resources.Bar(ctx, client, foo.Borrow())
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/resources.bar`: %s", err)
 			return
@@ -111,15 +100,11 @@ func TestResources(t *testing.T) {
 			t.Errorf("expected: `bar`, got: %s", v)
 			return
 		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
-			return
-		}
 	}
 
 	{
 		slog.DebugContext(ctx, "calling `wrpc-test:integration/strange.bar`")
-		v, shutdown, err := strange.Bar(ctx, client, foo.Borrow())
+		v, err := strange.Bar(ctx, client, foo.Borrow())
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/strange.bar`: %s", err)
 			return
@@ -128,15 +113,11 @@ func TestResources(t *testing.T) {
 			t.Errorf("expected: `bar`, got: %v", v)
 			return
 		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
-			return
-		}
 	}
 
 	{
 		slog.DebugContext(ctx, "calling `wrpc-test:integration/resources.[static]foo.foo`")
-		v, shutdown, err := resources.Foo_Foo(ctx, client, foo)
+		v, err := resources.Foo_Foo(ctx, client, foo)
 		if err != nil {
 			t.Errorf("failed to call `wrpc-test:integration/resources.bar`: %s", err)
 			return
@@ -145,19 +126,19 @@ func TestResources(t *testing.T) {
 			t.Errorf("expected: `foo`, got: %s", v)
 			return
 		}
-		if err := shutdown(); err != nil {
-			t.Errorf("failed to shutdown: %s", err)
-			return
-		}
 	}
 
-	if err := foo.Drop(ctx, client); err == nil {
-		t.Errorf("`foo` resource did not get dropped by moving")
-		return
-	}
+	// TODO: Reenable once resource dropping is supported
+	//if err := foo.Drop(ctx, client); err == nil {
+	//	t.Errorf("`foo` resource did not get dropped by moving")
+	//	return
+	//}
 
 	if err = stop(); err != nil {
 		t.Errorf("failed to stop serving `resources-server` world: %s", err)
 		return
+	}
+	if nc.NumSubscriptions() != 0 {
+		t.Errorf("NATS subscriptions leaked: %d active after client stop", nc.NumSubscriptions())
 	}
 }

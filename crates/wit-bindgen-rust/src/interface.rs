@@ -389,7 +389,7 @@ pub fn serve_interface<'a, T: {wrpc_transport}::Serve>(
                                                 if let Some(rx) = rx {{
                                                     rx.abort();
                                                 }}
-                                                {anyhow}::bail!("failed to transmit `{instance}.{wit_name}` invocation results")
+                                                {anyhow}::bail!(err.context("failed to transmit `{instance}.{wit_name}` invocation results"))
                                             }},
                                         }}
                                     }},
@@ -397,7 +397,7 @@ pub fn serve_interface<'a, T: {wrpc_transport}::Serve>(
                                         if let Some(rx) = rx {{
                                             rx.abort();
                                         }}
-                                        {anyhow}::bail!("failed to serve `{instance}.{wit_name}` invocation")
+                                        {anyhow}::bail!(err.context("failed to serve `{instance}.{wit_name}` invocation"))
                                     }},
                                 }}
                             }})
@@ -492,10 +492,16 @@ pub fn serve_interface<'a, T: {wrpc_transport}::Serve>(
         (snake, module_path)
     }
 
-    pub fn finish_append_submodule(mut self, snake: &str, module_path: Vec<String>) {
+    pub fn finish_append_submodule(mut self, snake: &str, module_path: Vec<String>, docs: &Docs) {
         let module = self.finish();
+
+        self.rustdoc(docs);
+        let docs = mem::take(&mut self.src).to_string();
+        let docs = docs.trim_end();
+
         let module = format!(
             "\
+                {docs}
                 #[allow(dead_code, clippy::all)]
                 pub mod {snake} {{
                     {module}
@@ -1283,35 +1289,53 @@ mod {mod_name} {{
                     let name = to_rust_ident(name);
                     uwrite!(self.src, " || f_{name}.is_some()");
                 }
-                uwriteln!(
+                uwrite!(
                     self.src,
-                    r"{{
-            return Some(::std::boxed::Box::new(|w, path| ::std::boxed::Box::pin(async move {{
-                {tokio}::try_join!(",
+                    r"
+                {{
+                    return Some(::std::boxed::Box::new(|w, mut path| {{",
                 );
                 for (i, Field { name, .. }) in fields.iter().enumerate() {
                     let name = to_rust_ident(name);
-                    uwriteln!(
+                    uwrite!(
                         self.src,
-                        r"async {{
-                            let w = ::std::sync::Arc::clone(&w);
-                            let Some(fut) = f_{name}
-                            else {{
-                                return Ok(())
-                            }};
-                            let mut path = path.clone();
+                        r"
+                        let f_{name} = f_{name}.map(|f| {{
                             path.push({i});
-                            fut(w, path).await
-                    }},"
+                            let w = {wrpc_transport}::Index::index(&w, &path);
+                            path.pop();
+                            (f, w)
+                        }});"
                     );
                 }
-                uwriteln!(
+                uwrite!(
                     self.src,
                     r"
-                        )?;
-                    Ok(())
-                }})))
-            }}",
+                        ::std::boxed::Box::pin(async move {{
+                            {tokio}::try_join!(",
+                );
+                for Field { name, .. } in fields {
+                    let name = to_rust_ident(name);
+                    uwrite!(
+                        self.src,
+                        r"
+                                async {{
+                                    match f_{name} {{
+                                        Some((f, Ok(w))) => f(w, Vec::default()).await,
+                                        Some((_, Err(err))) => Err(std::io::Error::other(err)),
+                                        None => Ok(()),
+                                    }}
+                                }},"
+                    );
+                }
+                uwrite!(
+                    self.src,
+                    r"
+                            )?;
+                            Ok(())
+                        }})
+                    }}))
+                }}",
                 );
             }
             uwriteln!(
@@ -1367,11 +1391,11 @@ mod {mod_name} {{
     }}
 
     #[automatically_derived]
-    impl<R> {wrpc_transport}::Deferred<R> for Decoder<R>
+    impl<R> {wrpc_transport}::Deferred<{wrpc_transport}::Incoming<R>> for Decoder<R>
     where
         R: ::core::marker::Send + ::core::marker::Sync + {wrpc_transport}::Index<R> + {tokio}::io::AsyncRead + ::core::marker::Unpin + 'static,
     {{
-        fn take_deferred(&mut self) -> ::core::option::Option<{wrpc_transport}::DeferredFn<R>> {{"
+        fn take_deferred(&mut self) -> ::core::option::Option<{wrpc_transport}::DeferredFn<{wrpc_transport}::Incoming<R>>> {{"
             );
             if !fields.is_empty() {
                 for Field { name, .. } in fields {
@@ -1383,35 +1407,53 @@ mod {mod_name} {{
                     let name = to_rust_ident(name);
                     uwrite!(self.src, " || f_{name}.is_some()");
                 }
-                uwriteln!(
+                uwrite!(
                     self.src,
-                    r"{{
-            return Some(::std::boxed::Box::new(|r, path| ::std::boxed::Box::pin(async move {{
-                {tokio}::try_join!(",
+                    r"
+                {{
+                    return Some(::std::boxed::Box::new(|r, mut path| {{",
                 );
                 for (i, Field { name, .. }) in fields.iter().enumerate() {
                     let name = to_rust_ident(name);
-                    uwriteln!(
+                    uwrite!(
                         self.src,
-                        r"async {{
-                            let r = ::std::sync::Arc::clone(&r);
-                            let Some(fut) = f_{name}
-                            else {{
-                                return Ok(())
-                            }};
-                            let mut path = path.clone();
+                        r"
+                        let f_{name} = f_{name}.map(|f| {{
                             path.push({i});
-                            fut(r, path).await
-                    }},"
+                            let r = {wrpc_transport}::Index::index(&r, &path);
+                            path.pop();
+                            (f, r)
+                        }});"
                     );
                 }
-                uwriteln!(
+                uwrite!(
                     self.src,
                     r"
-                        )?;
-                    Ok(())
-                }})))
-            }}",
+                        ::std::boxed::Box::pin(async move {{
+                            {tokio}::try_join!(",
+                );
+                for Field { name, .. } in fields {
+                    let name = to_rust_ident(name);
+                    uwrite!(
+                        self.src,
+                        r"
+                                async {{
+                                    match f_{name} {{
+                                        Some((f, Ok(r))) => f(r, Vec::default()).await,
+                                        Some((_, Err(err))) => Err(std::io::Error::other(err)),
+                                        None => Ok(()),
+                                    }}
+                                }},"
+                    );
+                }
+                uwrite!(
+                    self.src,
+                    r"
+                            )?;
+                            Ok(())
+                        }})
+                    }}))
+                }}",
                 );
             }
             uwriteln!(
@@ -1617,8 +1659,8 @@ mod {mod_name} {{
     pub struct Codec;
 
     #[automatically_derived]
-    impl<W> {wrpc_transport}::Deferred<W> for Codec {{
-        fn take_deferred(&mut self) -> ::core::option::Option<{wrpc_transport}::DeferredFn<W>> {{
+    impl<T> {wrpc_transport}::Deferred<T> for Codec {{
+        fn take_deferred(&mut self) -> ::core::option::Option<{wrpc_transport}::DeferredFn<T>> {{
             None
         }}
     }}
@@ -1783,8 +1825,8 @@ mod {mod_name} {{
     pub struct Codec;
 
     #[automatically_derived]
-    impl<W> {wrpc_transport}::Deferred<W> for Codec {{
-        fn take_deferred(&mut self) -> ::core::option::Option<{wrpc_transport}::DeferredFn<W>> {{
+    impl<T> {wrpc_transport}::Deferred<T> for Codec {{
+        fn take_deferred(&mut self) -> ::core::option::Option<{wrpc_transport}::DeferredFn<T>> {{
             None
         }}
     }}
@@ -2004,7 +2046,7 @@ mod {mod_name} {{
         R: ::core::marker::Send + ::core::marker::Sync + {wrpc_transport}::Index<R> + {tokio}::io::AsyncRead + ::core::marker::Unpin + 'static,
     {{
         Payload(::core::option::Option<PayloadDecoder<R>>),
-        Deferred(::core::option::Option<{wrpc_transport}::DeferredFn<R>>)
+        Deferred(::core::option::Option<{wrpc_transport}::DeferredFn<{wrpc_transport}::Incoming<R>>>)
     }}
 
     #[automatically_derived]
@@ -2018,11 +2060,11 @@ mod {mod_name} {{
     }}
 
     #[automatically_derived]
-    impl<R> {wrpc_transport}::Deferred<R> for Decoder<R>
+    impl<R> {wrpc_transport}::Deferred<{wrpc_transport}::Incoming<R>> for Decoder<R>
     where
         R: ::core::marker::Send + ::core::marker::Sync + {wrpc_transport}::Index<R> + {tokio}::io::AsyncRead + ::core::marker::Unpin + 'static,
     {{
-        fn take_deferred(&mut self) -> ::core::option::Option<{wrpc_transport}::DeferredFn<R>> {{
+        fn take_deferred(&mut self) -> ::core::option::Option<{wrpc_transport}::DeferredFn<{wrpc_transport}::Incoming<R>>> {{
             match self {{
                 Self::Payload(None) => None,"#
                 );
@@ -2124,7 +2166,7 @@ mod {mod_name} {{
                             let Some(payload) = dec.decode(src)? else {{
                                 return Ok(None)
                             }};
-                            *self = Self::Deferred({wrpc_transport}::Deferred::<R>::take_deferred(dec));
+                            *self = Self::Deferred({wrpc_transport}::Deferred::<{wrpc_transport}::Incoming<R>>::take_deferred(dec));
                             Ok(Some(super::{name}::{case}(payload)))
                         }},"
                         );
@@ -2179,9 +2221,11 @@ mod {mod_name} {{
             derives.extend(
                 [
                     ":: core :: clone :: Clone",
-                    ":: core :: marker :: Copy",
-                    ":: core :: cmp :: PartialEq",
                     ":: core :: cmp :: Eq",
+                    ":: core :: cmp :: Ord",
+                    ":: core :: cmp :: PartialEq",
+                    ":: core :: cmp :: PartialOrd",
+                    ":: core :: marker :: Copy",
                 ]
                 .into_iter()
                 .map(std::string::ToString::to_string),
@@ -2299,8 +2343,8 @@ mod {mod_name} {{
     pub struct Codec;
 
     #[automatically_derived]
-    impl<W> {wrpc_transport}::Deferred<W> for Codec {{
-        fn take_deferred(&mut self) -> ::core::option::Option<{wrpc_transport}::DeferredFn<W>> {{
+    impl<T> {wrpc_transport}::Deferred<T> for Codec {{
+        fn take_deferred(&mut self) -> ::core::option::Option<{wrpc_transport}::DeferredFn<T>> {{
             None
         }}
     }}

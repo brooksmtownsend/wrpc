@@ -1,21 +1,24 @@
 {
   nixConfig.extra-substituters = [
-    "https://wrpc.cachix.org"
+    "https://bytecodealliance.cachix.org"
     "https://wasmcloud.cachix.org"
     "https://nixify.cachix.org"
     "https://crane.cachix.org"
-    "https://bytecodealliance.cachix.org"
     "https://nix-community.cachix.org"
-    "https://cache.garnix.io"
+  ];
+  nixConfig.extra-trusted-substituters = [
+    "https://bytecodealliance.cachix.org"
+    "https://wasmcloud.cachix.org"
+    "https://nixify.cachix.org"
+    "https://crane.cachix.org"
+    "https://nix-community.cachix.org"
   ];
   nixConfig.extra-trusted-public-keys = [
-    "wrpc.cachix.org-1:J1xnzWo1nnhlzOmZCA10/5wz87LwCFwQtnqCibCy67w="
+    "bytecodealliance.cachix.org-1:0SBgh//n2n0heh0sDFhTm+ZKBRy2sInakzFGfzN531Y="
     "wasmcloud.cachix.org-1:9gRBzsKh+x2HbVVspreFg/6iFRiD4aOcUQfXVDl3hiM="
     "nixify.cachix.org-1:95SiUQuf8Ij0hwDweALJsLtnMyv/otZamWNRp1Q1pXw="
     "crane.cachix.org-1:8Scfpmn9w+hGdXH/Q9tTLiYAE/2dnJYRJP7kl80GuRk="
-    "bytecodealliance.cachix.org-1:0SBgh//n2n0heh0sDFhTm+ZKBRy2sInakzFGfzN531Y="
     "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
-    "cache.garnix.io:CTFPyKSLcx5RMJKfLo5EEPUObbA78b0YQ2DTCJXqr9g="
   ];
 
   inputs.nixify.inputs.nixlib.follows = "nixlib";
@@ -24,7 +27,7 @@
   inputs.nixpkgs-unstable.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   inputs.wit-deps.inputs.nixify.follows = "nixify";
   inputs.wit-deps.inputs.nixlib.follows = "nixlib";
-  inputs.wit-deps.url = "github:bytecodealliance/wit-deps/v0.3.5";
+  inputs.wit-deps.url = "github:bytecodealliance/wit-deps/v0.5.0";
 
   outputs = {
     nixify,
@@ -69,6 +72,7 @@
           "LICENSE"
           "README.md"
           "SECURITY.md"
+          "SPEC.md"
         ];
 
         doCheck = false; # testing is performed in checks via `nextest`
@@ -80,7 +84,8 @@
         targets.powerpc64le-unknown-linux-gnu = false;
         targets.s390x-unknown-linux-gnu = false;
         targets.wasm32-unknown-unknown = false;
-        targets.wasm32-wasi = false;
+        targets.wasm32-wasip1 = false;
+        targets.wasm32-wasip2 = false;
 
         clippy.deny = ["warnings"];
         clippy.workspace = true;
@@ -93,29 +98,12 @@
           pkgsCross ? pkgs,
           ...
         }: {
-          buildInputs ? [],
-          depsBuildBuild ? [],
-          nativeBuildInputs ? [],
           nativeCheckInputs ? [],
           preCheck ? "",
           ...
         } @ args:
-          with pkgs.lib; let
-            darwin2darwin = pkgs.stdenv.hostPlatform.isDarwin && pkgsCross.stdenv.hostPlatform.isDarwin;
-
-            depsBuildBuild' =
-              depsBuildBuild
-              ++ optional pkgs.stdenv.hostPlatform.isDarwin pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
-              ++ optional darwin2darwin pkgs.xcbuild.xcrun;
-          in
-            {
-              buildInputs =
-                buildInputs
-                ++ optional pkgs.stdenv.hostPlatform.isDarwin pkgs.libiconv;
-
-              depsBuildBuild = depsBuildBuild';
-            }
-            // optionalAttrs (args ? cargoArtifacts) {
+          with pkgs.lib;
+            optionalAttrs (args ? cargoArtifacts) {
               preCheck =
                 ''
                   export GOCACHE=$TMPDIR/gocache
@@ -124,13 +112,6 @@
                   export HOME=$TMPDIR/home
                 ''
                 + preCheck;
-
-              depsBuildBuild =
-                depsBuildBuild'
-                ++ optionals darwin2darwin [
-                  pkgs.darwin.apple_sdk.frameworks.CoreFoundation
-                  pkgs.darwin.apple_sdk.frameworks.CoreServices
-                ];
 
               nativeCheckInputs =
                 nativeCheckInputs
@@ -224,11 +205,12 @@
           extendDerivations {
             buildInputs = [
               pkgs.cargo-audit
-              pkgs.nats-server
-              pkgs.natscli
+              pkgs.cargo-nextest
               pkgs.wit-deps
 
               pkgs.pkgsUnstable.go
+              pkgs.pkgsUnstable.nats-server
+              pkgs.pkgsUnstable.natscli
             ];
           }
           devShells;
